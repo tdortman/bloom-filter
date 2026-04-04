@@ -1,0 +1,26 @@
+diff --git a/kmc_core/fastq_reader.h b/kmc_core/fastq_reader.h
+index e663afd..e38b61f 100644
+--- a/kmc_core/fastq_reader.h
++++ b/kmc_core/fastq_reader.h
+@@ -15,7 +15,7 @@
+ #include "params.h"
+ #include <stdio.h>
+ 
+-#include "../3rd_party/cloudflare/zlib.h"
++#include <zlib.h>
+ 
+ using namespace std;
+ 
+diff --git a/kmc_tools/fastq_reader.h b/kmc_tools/fastq_reader.h
+index 6446f67..7756b39 100644
+--- a/kmc_tools/fastq_reader.h
++++ b/kmc_tools/fastq_reader.h
+@@ -17,7 +17,7 @@
+ #include <stdio.h>
+ #include <iostream>
+ 
+-#include "../3rd_party/cloudflare/zlib.h"
++#include <zlib.h>
+ 
+ using namespace std;
+ 
