@@ -78,6 +78,13 @@ class Filter;
 
 namespace detail {
 
+template <typename Tile, typename WordType>
+[[nodiscard]] __device__ __forceinline__ WordType tileOrReduce4(const Tile& tile, WordType value) {
+    value |= tile.shfl_xor(value, 1);
+    value |= tile.shfl_xor(value, 2);
+    return value;
+}
+
 template <typename Config>
 __global__ void preprocessSequenceKernel(
     const char* sequence,
@@ -107,6 +114,15 @@ __global__ void containsSequenceKernel(
     const uint64_t* leaderIndices,
     uint64_t leaderCount,
     const uint64_t* smerPackedPositions,
+    uint64_t numShards,
+    const typename Filter<Config>::Shard* shards,
+    uint8_t* output
+);
+
+template <typename Config>
+__global__ void containsSequenceFusedKernel(
+    const char* sequence,
+    uint64_t sequenceLength,
     uint64_t numShards,
     const typename Filter<Config>::Shard* shards,
     uint8_t* output
@@ -236,6 +252,20 @@ encodeWindow(const char* sequence, uint64_t start, uint64_t& packed) {
     _Pragma("unroll")
     for (uint64_t i = 0; i < Length; ++i) {
         const uint8_t encoded = encodeBase(static_cast<uint8_t>(sequence[start + i]));
+        invalid |= static_cast<uint8_t>(encoded >> 2);
+        packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3u);
+    }
+    return invalid == 0;
+}
+
+template <uint64_t Length>
+__device__ __forceinline__ bool
+encodeWindow(const uint8_t* encodedSequence, uint64_t start, uint64_t& packed) {
+    packed = 0;
+    uint8_t invalid = 0;
+    _Pragma("unroll")
+    for (uint64_t i = 0; i < Length; ++i) {
+        const uint8_t encoded = encodedSequence[start + i];
         invalid |= static_cast<uint8_t>(encoded >> 2);
         packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3u);
     }
@@ -432,7 +462,7 @@ class Filter {
                         return;
                     }
                     const uint64_t address = bitAddress<HashIndex>(baseHash);
-                    present = (wordBuffer[wordIndex(address)] & bitMask(address)) != 0;
+                    present = ((wordBuffer[wordIndex(address)] & bitMask(address)) != 0);
                 }
             );
             return present;
@@ -451,7 +481,7 @@ class Filter {
                     constexpr uint64_t shift = (HashIndex & 7) * 8;
                     const auto address =
                         static_cast<uint64_t>((packedPositions[packIndex] >> shift) & 0xFFu);
-                    present = (words[wordIndex(address)] & bitMask(address)) != 0;
+                    present = ((words[wordIndex(address)] & bitMask(address)) != 0);
                 }
             );
             return present;
@@ -481,7 +511,31 @@ class Filter {
                     const uint64_t idx = wordIndex(address);
                     const WordType word =
                         idx == 0 ? word0 : (idx == 1 ? word1 : (idx == 2 ? word2 : word3));
-                    present = (word & bitMask(address)) != 0;
+                    present = ((word & bitMask(address)) != 0);
+                }
+            );
+            return present;
+        }
+
+        [[nodiscard]] __device__ static bool containsHashInRegisters4(
+            WordType word0,
+            WordType word1,
+            WordType word2,
+            WordType word3,
+            uint64_t baseHash
+        ) {
+            static_assert(wordCount == 4, "containsHashInRegisters4 requires four words");
+            bool present = true;
+            detail::forEachHashIndex<Config>(
+                [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
+                    if (!present) {
+                        return;
+                    }
+                    const uint64_t address = bitAddress<HashIndex>(baseHash);
+                    const uint64_t idx = wordIndex(address);
+                    const WordType word =
+                        idx == 0 ? word0 : (idx == 1 ? word1 : (idx == 2 ? word2 : word3));
+                    present = ((word & bitMask(address)) != 0);
                 }
             );
             return present;
@@ -525,6 +579,10 @@ class Filter {
     };
 
     static constexpr uint64_t defaultChunkBases = 1 << 20;
+    static constexpr bool fusedQueryKernelSupported =
+        Config::queryGroupSize == 1 && Config::blockWordCount == 4 &&
+        std::is_same_v<typename Config::WordType, uint64_t>;
+    static constexpr bool useFusedQueryPath = fusedQueryKernelSupported;
 
     explicit Filter(uint64_t requestedFilterBits, uint64_t chunkBases = defaultChunkBases)
         : numShards_(
@@ -603,8 +661,10 @@ class Filter {
         }
 
         stageSequence(sequence, length, stream);
-        ensureMetadataCapacity(length - Config::k + 1);
-        launchPreprocess(d_sequence_, length, stream);
+        if constexpr (!useFusedQueryPath) {
+            ensureMetadataCapacity(length - Config::k + 1);
+            launchPreprocess(d_sequence_, length, stream);
+        }
         launchContains(d_sequence_, length, d_output, stream);
         CUDA_CALL(cudaStreamSynchronize(stream));
     }
@@ -618,8 +678,10 @@ class Filter {
         std::vector<uint8_t> output(length - Config::k + 1);
 
         stageSequence(sequence, length, stream);
-        ensureMetadataCapacity(output.size());
-        launchPreprocess(d_sequence_, length, stream);
+        if constexpr (!useFusedQueryPath) {
+            ensureMetadataCapacity(output.size());
+            launchPreprocess(d_sequence_, length, stream);
+        }
         ensureResultCapacity(output.size());
         launchContains(d_sequence_, length, d_resultBuffer_, stream);
         CUDA_CALL(cudaMemcpyAsync(
@@ -799,16 +861,25 @@ class Filter {
         uint8_t* d_output,
         cudaStream_t stream
     ) const {
-        (void)d_chunk;
         const uint64_t chunkKmers = chunkLength - Config::k + 1;
+
+        CUDA_CALL(cudaMemsetAsync(d_output, 0, chunkKmers * sizeof(uint8_t), stream));
+
+        if constexpr (useFusedQueryPath) {
+            const uint64_t gridSize = SDIV(chunkKmers, Config::cudaBlockSize);
+            detail::containsSequenceFusedKernel<Config>
+                <<<gridSize, Config::cudaBlockSize, 0, stream>>>(
+                    d_chunk, chunkLength, numShards_, d_shards_, d_output
+                );
+            CUDA_CALL(cudaGetLastError());
+            return;
+        }
+
         if (leaderCountHost_ == 0) {
-            CUDA_CALL(cudaMemsetAsync(d_output, 0, chunkKmers * sizeof(uint8_t), stream));
             return;
         }
         const uint64_t groupsPerBlock = Config::cudaBlockSize / Config::queryGroupSize;
         const uint64_t gridSize = SDIV(leaderCountHost_, groupsPerBlock);
-
-        CUDA_CALL(cudaMemsetAsync(d_output, 0, chunkKmers * sizeof(uint8_t), stream));
 
         detail::containsSequenceKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
             d_minimizerHashes_,
@@ -1049,8 +1120,6 @@ __global__ void insertSequenceKernel(
     constexpr uint64_t tileSize = Config::insertGroupSize;
     constexpr uint64_t groupsPerBlock = Config::cudaBlockSize / tileSize;
     constexpr uint64_t chunkHashCount = 4;
-    __shared__
-        typename Config::WordType runMasks[groupsPerBlock][chunkHashCount * Config::blockWordCount];
 
     auto block = cg::this_thread_block();
     auto tile = cg::tiled_partition<tileSize>(block);
@@ -1082,61 +1151,57 @@ __global__ void insertSequenceKernel(
         for (uint64_t chunk = 0; chunk < fullChunks; ++chunk) {
             const uint64_t smerBase = chunk * chunkHashCount;
 
-            for (auto idx = static_cast<uint64_t>(lane); idx < chunkHashCount; idx += tile.size()) {
-                const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerBase + idx);
-                const uint64_t sourceBase =
-                    static_cast<uint64_t>(smerIndex) * Config::packedPositionWords;
-                typename Config::WordType mask0 = 0;
-                typename Config::WordType mask1 = 0;
-                typename Config::WordType mask2 = 0;
-                typename Config::WordType mask3 = 0;
-                Filter<Config>::Shard::decodePackedPositionsToMasks4(
-                    &smerPackedPositions[sourceBase], mask0, mask1, mask2, mask3
-                );
-                const uint64_t targetBase = idx * Config::blockWordCount;
-                runMasks[groupSlot][targetBase + 0] = mask0;
-                runMasks[groupSlot][targetBase + 1] = mask1;
-                runMasks[groupSlot][targetBase + 2] = mask2;
-                runMasks[groupSlot][targetBase + 3] = mask3;
-            }
-            tile.sync();
+            typename Config::WordType mask0 = 0;
+            typename Config::WordType mask1 = 0;
+            typename Config::WordType mask2 = 0;
+            typename Config::WordType mask3 = 0;
+            const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerBase + lane);
+            const uint64_t sourceBase = static_cast<uint64_t>(smerIndex) * Config::packedPositionWords;
+            Filter<Config>::Shard::decodePackedPositionsToMasks4(
+                &smerPackedPositions[sourceBase], mask0, mask1, mask2, mask3
+            );
 
             _Pragma("unroll")
-            for (uint64_t smerOffset = 0; smerOffset < chunkHashCount; ++smerOffset) {
-                wordMask |=
-                    runMasks[groupSlot]
-                            [smerOffset * Config::blockWordCount + static_cast<uint64_t>(lane)];
+            for (uint32_t src = 0; src < chunkHashCount; ++src) {
+                const auto srcMask0 = tile.shfl(mask0, src);
+                const auto srcMask1 = tile.shfl(mask1, src);
+                const auto srcMask2 = tile.shfl(mask2, src);
+                const auto srcMask3 = tile.shfl(mask3, src);
+                const auto srcMask =
+                    lane == 0 ? srcMask0 : (lane == 1 ? srcMask1 : (lane == 2 ? srcMask2 : srcMask3));
+                wordMask |= srcMask;
             }
-            tile.sync();
         }
 
         if (tailHashes != 0) {
             const uint64_t smerBase = fullChunks * chunkHashCount;
-            for (auto idx = static_cast<uint64_t>(lane); idx < tailHashes; idx += tile.size()) {
-                const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerBase + idx);
+
+            typename Config::WordType mask0 = 0;
+            typename Config::WordType mask1 = 0;
+            typename Config::WordType mask2 = 0;
+            typename Config::WordType mask3 = 0;
+            if (static_cast<uint64_t>(lane) < tailHashes) {
+                const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerBase + lane);
                 const uint64_t sourceBase =
                     static_cast<uint64_t>(smerIndex) * Config::packedPositionWords;
-                typename Config::WordType mask0 = 0;
-                typename Config::WordType mask1 = 0;
-                typename Config::WordType mask2 = 0;
-                typename Config::WordType mask3 = 0;
                 Filter<Config>::Shard::decodePackedPositionsToMasks4(
                     &smerPackedPositions[sourceBase], mask0, mask1, mask2, mask3
                 );
-                const uint64_t targetBase = idx * Config::blockWordCount;
-                runMasks[groupSlot][targetBase + 0] = mask0;
-                runMasks[groupSlot][targetBase + 1] = mask1;
-                runMasks[groupSlot][targetBase + 2] = mask2;
-                runMasks[groupSlot][targetBase + 3] = mask3;
             }
-            tile.sync();
 
-            for (uint64_t smerOffset = 0; smerOffset < tailHashes; ++smerOffset) {
-                wordMask |=
-                    runMasks[groupSlot]
-                            [smerOffset * Config::blockWordCount + static_cast<uint64_t>(lane)];
+            _Pragma("unroll")
+            for (uint32_t src = 0; src < chunkHashCount; ++src) {
+                const auto srcMask0 = tile.shfl(mask0, src);
+                const auto srcMask1 = tile.shfl(mask1, src);
+                const auto srcMask2 = tile.shfl(mask2, src);
+                const auto srcMask3 = tile.shfl(mask3, src);
+                const auto srcMask =
+                    lane == 0 ? srcMask0 : (lane == 1 ? srcMask1 : (lane == 2 ? srcMask2 : srcMask3));
+                const auto srcActive = static_cast<typename Config::WordType>(
+                    static_cast<uint64_t>(src) < tailHashes
+                );
+                wordMask |= srcMask & (typename Config::WordType{0} - srcActive);
             }
-            tile.sync();
         }
     } else {
         for (uint64_t smerOffset = 0; smerOffset < smerCount; ++smerOffset) {
@@ -1330,6 +1395,132 @@ __global__ void containsSequenceKernel(
             }
         }
     }
+}
+
+template <typename Config>
+__global__ void containsSequenceFusedKernel(
+    const char* sequence,
+    uint64_t sequenceLength,
+    uint64_t numShards,
+    const typename Filter<Config>::Shard* shards,
+    uint8_t* output
+) {
+    if (sequenceLength < Config::k) {
+        return;
+    }
+
+    constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
+    constexpr uint64_t mmerTileCount = Config::cudaBlockSize + Config::minimizerSpan - 1;
+    constexpr uint64_t smerTileCount = Config::cudaBlockSize + Config::findereSpan - 1;
+
+    __shared__ uint8_t sequenceTile[sequenceTileBases];
+    __shared__ uint64_t mmerHashes[mmerTileCount];
+    __shared__ uint64_t smerHashes[smerTileCount];
+
+    const uint64_t numKmers = sequenceLength - Config::k + 1;
+    const uint64_t numSmers = sequenceLength - Config::s + 1;
+    const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
+    if (blockStartKmer >= numKmers) {
+        return;
+    }
+
+    const uint64_t blockKmers =
+        min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
+    const uint64_t tileBases = blockKmers + Config::k - 1;
+
+    bool localInvalidBase = false;
+    for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
+        const uint8_t encodedBase = encodeBase(sequence[blockStartKmer + idx]);
+        sequenceTile[idx] = encodedBase;
+        localInvalidBase = localInvalidBase || (encodedBase > 3);
+    }
+    const bool blockAllValid = __syncthreads_count(localInvalidBase) == 0;
+
+    const uint64_t blockMmers = blockKmers + Config::minimizerSpan - 1;
+    for (uint64_t idx = threadIdx.x; idx < blockMmers; idx += Config::cudaBlockSize) {
+        if (blockAllValid) {
+            const uint64_t packedMmer = packEncodedWindowUnchecked<Config::m>(sequenceTile, idx);
+            mmerHashes[idx] = xxhash::xxhash64(packedMmer);
+        } else {
+            uint64_t packedMmer = 0;
+            if (!encodeWindow<Config::m>(sequenceTile, idx, packedMmer)) {
+                mmerHashes[idx] = kInvalidHash;
+            } else {
+                mmerHashes[idx] = xxhash::xxhash64(packedMmer);
+            }
+        }
+    }
+
+    const uint64_t blockSmers =
+        min(blockKmers + Config::findereSpan - 1, numSmers - blockStartKmer);
+    for (uint64_t idx = threadIdx.x; idx < blockSmers; idx += Config::cudaBlockSize) {
+        if (blockAllValid) {
+            const uint64_t packedSmer = packEncodedWindowUnchecked<Config::s>(sequenceTile, idx);
+            smerHashes[idx] = xxhash::xxhash64(packedSmer);
+        } else {
+            uint64_t packedSmer = 0;
+            if (!encodeWindow<Config::s>(sequenceTile, idx, packedSmer)) {
+                smerHashes[idx] = kInvalidHash;
+            } else {
+                smerHashes[idx] = xxhash::xxhash64(packedSmer);
+            }
+        }
+    }
+    __syncthreads();
+
+    const uint64_t localKmerIndex = static_cast<uint64_t>(threadIdx.x);
+    if (localKmerIndex >= blockKmers) {
+        return;
+    }
+
+    const uint64_t kmerIndex = blockStartKmer + localKmerIndex;
+
+    uint64_t minimizerHash = kInvalidHash;
+    bool kmerValid = true;
+    _Pragma("unroll")
+    for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
+        const uint64_t candidate = mmerHashes[localKmerIndex + offset];
+        if (candidate == kInvalidHash) {
+            kmerValid = false;
+            break;
+        }
+        minimizerHash = candidate < minimizerHash ? candidate : minimizerHash;
+    }
+
+    if (!kmerValid) {
+        output[kmerIndex] = 0;
+        return;
+    }
+
+    typename Config::WordType word0 = 0;
+    typename Config::WordType word1 = 0;
+    typename Config::WordType word2 = 0;
+    typename Config::WordType word3 = 0;
+
+#if __CUDA_ARCH__ >= 1000
+    detail::load256BitGlobalNC(shards[minimizerHash & (numShards - 1)].words, word0, word1, word2, word3);
+#else
+    const auto& shard = shards[minimizerHash & (numShards - 1)];
+    word0 = shard.words[0];
+    word1 = shard.words[1];
+    word2 = shard.words[2];
+    word3 = shard.words[3];
+#endif
+
+    bool present = true;
+    _Pragma("unroll")
+    for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
+        const uint64_t baseHash = smerHashes[localKmerIndex + smerOffset];
+        if (baseHash == kInvalidHash) {
+            present = false;
+            break;
+        }
+        if (!Filter<Config>::Shard::containsHashInRegisters4(word0, word1, word2, word3, baseHash)) {
+            present = false;
+            break;
+        }
+    }
+    output[kmerIndex] = static_cast<uint8_t>(present);
 }
 
 }  // namespace detail

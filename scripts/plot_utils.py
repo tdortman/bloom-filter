@@ -16,42 +16,23 @@ import pandas as pd
 import typer
 
 FILTER_STYLES = {
-    "gcf": {"color": "#2E86AB", "marker": "o"},
-    "ccf": {"color": "#00B4D8", "marker": "o"},
-    "bbf": {"color": "#A23B72", "marker": "s"},
-    "tcf": {"color": "#C73E1D", "marker": "^"},
-    "gqf": {"color": "#F18F01", "marker": "D"},
-    "pcf": {"color": "#6A994E", "marker": "D"},
-    "dm": {"color": "#9932CC", "marker": "*"},
-    "bcht": {"color": "#264653", "marker": "X"},
+    "superbloom": {"color": "#2E86AB", "marker": "o"},
+    "cucobloom": {"color": "#A23B72", "marker": "s"},
 }
 
 FILTER_COLORS = {
-    "Cuckoo-GPU": FILTER_STYLES["gcf"]["color"],
-    "CPU Cuckoo": FILTER_STYLES["ccf"]["color"],
-    "GBBF": FILTER_STYLES["bbf"]["color"],
-    "TCF": FILTER_STYLES["tcf"]["color"],
-    "GQF": FILTER_STYLES["gqf"]["color"],
-    "PCF": FILTER_STYLES["pcf"]["color"],
-    "Dynamic Map": FILTER_STYLES["dm"]["color"],
-    "BCHT": FILTER_STYLES["bcht"]["color"],
+    "superbloom": FILTER_STYLES["superbloom"]["color"],
+    "cucobloom": FILTER_STYLES["cucobloom"]["color"],
 }
 
 FILTER_DISPLAY_NAMES = {
-    "gcf": "Cuckoo-GPU",
-    "ccf": "CPU Cuckoo",
-    "tcf": "TCF",
-    "gqf": "GQF",
-    "pcf": "PCF",
-    "bbf": "GBBF",
-    "dm": "Dynamic Map",
-    "bcht": "BCHT",
+    "superbloom": "SuperBloom GPU",
+    "cucobloom": "GPU Blocked Bloom",
 }
 
 OPERATION_COLORS = {
-    "Insert": FILTER_COLORS["Cuckoo-GPU"],
-    "Query": FILTER_COLORS["GBBF"],
-    "Delete": FILTER_COLORS["GQF"],
+    "Insert": FILTER_COLORS["superbloom"],
+    "Query": FILTER_COLORS["cucobloom"],
 }
 
 
@@ -385,24 +366,6 @@ def parse_fixture_benchmark_name(name: str) -> Optional[tuple[str, str, int]]:
         return None
 
     return fixture_match.group("base").lower(), operation, int(size_str)
-
-
-POLICY_COLORS = {
-    "Xor": FILTER_STYLES["gcf"]["color"],
-    "AddSub": FILTER_STYLES["tcf"]["color"],
-    "Offset": FILTER_STYLES["gqf"]["color"],
-}
-
-POLICY_DISPLAY_NAMES = {
-    "xor": "XOR",
-    "addsub": "Add/Sub",
-    "offset": "Offset",
-}
-
-
-def get_policy_display_name(policy: str) -> str:
-    """Get display name for a bucket policy."""
-    return POLICY_DISPLAY_NAMES.get(policy.lower(), policy)
 
 
 def clustered_bar_chart(
