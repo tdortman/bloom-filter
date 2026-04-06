@@ -187,26 +187,6 @@ template <uint64_t Index>
     return SaltLiteral<Index>::value;
 }
 
-template <uint64_t Begin, uint64_t End>
-[[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t multiplicativeSaltDecisionTree(
-    uint64_t index
-) {
-    static_assert(Begin < End, "Invalid salt decision tree range");
-    if constexpr (End - Begin == 1) {
-        return multiplicativeSaltLiteral<Begin>();
-    } else {
-        constexpr uint64_t mid = Begin + (End - Begin) / 2;
-        return index < mid ? multiplicativeSaltDecisionTree<Begin, mid>(index)
-                           : multiplicativeSaltDecisionTree<mid, End>(index);
-    }
-}
-
-[[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t multiplicativeSalt(
-    uint64_t index
-) {
-    return multiplicativeSaltDecisionTree<0, 16>(index);
-}
-
 template <typename Config, typename Fn, uint64_t... HashIndices>
 __host__ __device__ __forceinline__ void
 forEachHashIndexImpl(Fn&& fn, std::index_sequence<HashIndices...>) {
@@ -256,20 +236,6 @@ encodeWindow(const char* sequence, uint64_t start, uint64_t& packed) {
     _Pragma("unroll")
     for (uint64_t i = 0; i < Length; ++i) {
         const uint8_t encoded = encodeBase(static_cast<uint8_t>(sequence[start + i]));
-        invalid |= static_cast<uint8_t>(encoded >> 2);
-        packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3u);
-    }
-    return invalid == 0;
-}
-
-template <uint64_t Length, typename EncodedType>
-__device__ __forceinline__ bool
-encodeWindow(const EncodedType* sequence, uint64_t start, uint64_t& packed) {
-    packed = 0;
-    uint8_t invalid = 0;
-    _Pragma("unroll")
-    for (uint64_t i = 0; i < Length; ++i) {
-        const auto encoded = static_cast<uint8_t>(sequence[start + i]);
         invalid |= static_cast<uint8_t>(encoded >> 2);
         packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3u);
     }
@@ -355,61 +321,6 @@ minimizerHashDirect(const char* sequence, uint64_t kmerStart) {
     return minimumHash;
 }
 
-template <typename Config, typename Tile, typename EncodedType>
-[[nodiscard]] __device__ __forceinline__ uint64_t
-minimizerHashCooperative(const Tile& tile, const EncodedType* sequence, uint64_t kmerStart) {
-    uint64_t minimizerHash = kInvalidHash;
-    if (static_cast<uint64_t>(tile.thread_rank()) < Config::minimizerSpan) {
-        uint64_t packedMmer = 0;
-        encodeWindow<Config::m>(
-            sequence, kmerStart + static_cast<uint64_t>(tile.thread_rank()), packedMmer
-        );
-        minimizerHash = xxhash::xxhash64(packedMmer);
-    }
-
-    for (int offset = static_cast<int>(tile.size()) / 2; offset > 0; offset /= 2) {
-        const auto other = tile.shfl_down(minimizerHash, offset);
-        minimizerHash = other < minimizerHash ? other : minimizerHash;
-    }
-    return tile.shfl(minimizerHash, 0);
-}
-
-template <typename Config>
-[[nodiscard]] __device__ __forceinline__ bool
-isRunLeader(const char* sequence, uint64_t kmerIndex, uint64_t minimizerHash) {
-    if (kmerIndex == 0) {
-        return true;
-    }
-
-    uint64_t packedPrev = 0;
-    if (!encodeWindow<Config::k>(sequence, kmerIndex - 1, packedPrev)) {
-        return true;
-    }
-
-    return minimizerHashDirect<Config>(sequence, kmerIndex - 1) != minimizerHash;
-}
-
-template <typename Config>
-[[nodiscard]] __device__ __forceinline__ uint64_t extendRunLength(
-    const char* sequence,
-    uint64_t runStart,
-    uint64_t numKmers,
-    uint64_t minimizerHash
-) {
-    uint64_t runLength = 1;
-    while (runStart + runLength < numKmers) {
-        uint64_t packedKmer = 0;
-        if (!encodeWindow<Config::k>(sequence, runStart + runLength, packedKmer)) {
-            break;
-        }
-        if (minimizerHashDirect<Config>(sequence, runStart + runLength) != minimizerHash) {
-            break;
-        }
-        ++runLength;
-    }
-    return runLength;
-}
-
 template <typename Config, typename Tile>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 minimizerHashBatchReuse(const Tile& tile, uint64_t laneHash, const uint64_t* tailHashes) {
@@ -424,71 +335,6 @@ minimizerHashBatchReuse(const Tile& tile, uint64_t laneHash, const uint64_t* tai
         minimizerHash = candidate < minimizerHash ? candidate : minimizerHash;
     }
     return minimizerHash;
-}
-
-template <typename Config, typename Tile>
-[[nodiscard]] __device__ __forceinline__ uint32_t countRunMatchesCooperative(
-    const Tile& tile,
-    const char* sequence,
-    uint64_t batchStart,
-    uint64_t batchKmers,
-    uint64_t targetMinimizerHash,
-    uint64_t* tailHashes
-) {
-    const auto tileSize = static_cast<uint64_t>(tile.size());
-    const int lane = static_cast<int>(tile.thread_rank());
-    const uint64_t mmerCount = batchKmers + Config::minimizerSpan - 1;
-    const uint64_t inTileMMers = mmerCount < tileSize ? mmerCount : tileSize;
-
-    uint64_t laneMmerHash = kInvalidHash;
-    if (static_cast<uint64_t>(lane) < inTileMMers) {
-        uint64_t packedMmer = 0;
-        if (encodeWindow<Config::m>(
-                sequence, batchStart + static_cast<uint64_t>(lane), packedMmer
-            )) {
-            laneMmerHash = xxhash::xxhash64(packedMmer);
-        }
-    }
-
-    if constexpr (Config::minimizerSpan > 1) {
-        if (static_cast<uint64_t>(lane) < Config::minimizerSpan - 1) {
-            const uint64_t tailIndex = tileSize + static_cast<uint64_t>(lane);
-            uint64_t tailHash = kInvalidHash;
-            if (tailIndex < mmerCount) {
-                uint64_t packedTail = 0;
-                if (encodeWindow<Config::m>(sequence, batchStart + tailIndex, packedTail)) {
-                    tailHash = xxhash::xxhash64(packedTail);
-                }
-            }
-            tailHashes[lane] = tailHash;
-        }
-    }
-    tile.sync();
-
-    int kmerValid = 0;
-    uint64_t minimizerHash = kInvalidHash;
-    if (static_cast<uint64_t>(lane) < batchKmers) {
-        uint64_t packedKmer = 0;
-        kmerValid =
-            encodeWindow<Config::k>(sequence, batchStart + static_cast<uint64_t>(lane), packedKmer);
-        if (kmerValid != 0) {
-            minimizerHash = minimizerHashBatchReuse<Config>(tile, laneMmerHash, tailHashes);
-        }
-    }
-
-    uint32_t matches = 0;
-    if (lane == 0) {
-        for (uint64_t kmerOffset = 0; kmerOffset < batchKmers; ++kmerOffset) {
-            if (tile.shfl(kmerValid, static_cast<int>(kmerOffset)) == 0) {
-                break;
-            }
-            if (tile.shfl(minimizerHash, static_cast<int>(kmerOffset)) != targetMinimizerHash) {
-                break;
-            }
-            ++matches;
-        }
-    }
-    return tile.shfl(matches, 0);
 }
 
 }  // namespace detail
@@ -509,12 +355,6 @@ class Filter {
         [[nodiscard]] __host__ __device__ static uint64_t bitAddress(uint64_t baseHash) {
             static_assert(HashIndex < Config::hashCount, "Hash index out of range");
             const uint64_t mixed = baseHash * detail::multiplicativeSaltLiteral<HashIndex>();
-            return static_cast<uint64_t>(mixed >> (64 - blockShift));
-        }
-
-        [[nodiscard]] __host__ __device__ static uint64_t
-        bitAddress(uint64_t baseHash, uint64_t hashIndex) {
-            const uint64_t mixed = baseHash * detail::multiplicativeSalt(hashIndex);
             return static_cast<uint64_t>(mixed >> (64 - blockShift));
         }
 
@@ -593,30 +433,6 @@ class Filter {
                     }
                     const uint64_t address = bitAddress<HashIndex>(baseHash);
                     present = (wordBuffer[wordIndex(address)] & bitMask(address)) != 0;
-                }
-            );
-            return present;
-        }
-
-        [[nodiscard]] __device__ static bool containsHashInRegisters4(
-            WordType word0,
-            WordType word1,
-            WordType word2,
-            WordType word3,
-            uint64_t baseHash
-        ) {
-            static_assert(wordCount == 4, "containsHashInRegisters4 requires four words");
-            bool present = true;
-            detail::forEachHashIndex<Config>(
-                [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
-                    if (!present) {
-                        return;
-                    }
-                    const uint64_t address = bitAddress<HashIndex>(baseHash);
-                    const uint64_t idx = wordIndex(address);
-                    const WordType word =
-                        idx == 0 ? word0 : (idx == 1 ? word1 : (idx == 2 ? word2 : word3));
-                    present = (word & bitMask(address)) != 0;
                 }
             );
             return present;
@@ -703,21 +519,8 @@ class Filter {
 #endif
         }
 
-        [[nodiscard]] __device__ bool containsHash(uint64_t baseHash) const {
-            return containsHashInWords(words, baseHash);
-        }
-
         __device__ void atomicOrWordMask(uint64_t ownedWord, WordType wordMask) {
             detail::atomicOrWord(&words[ownedWord], wordMask);
-        }
-
-        __device__ void insertHash(uint64_t baseHash) {
-            detail::forEachHashIndex<Config>(
-                [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
-                    const uint64_t address = bitAddress<HashIndex>(baseHash);
-                    detail::atomicOrWord(&words[wordIndex(address)], bitMask(address));
-                }
-            );
         }
     };
 
@@ -955,9 +758,8 @@ class Filter {
         ));
     }
 
-    void launchInsert(const char* dChunk, uint64_t chunkLength, cudaStream_t stream) {
-        (void)dChunk;
-        (void)chunkLength;
+    void launchInsert(const char* d_chunk, uint64_t chunkLength, cudaStream_t stream) {
+        (void)d_chunk;
         if (leaderCountHost_ == 0) {
             return;
         }
@@ -992,12 +794,12 @@ class Filter {
     }
 
     void launchContains(
-        const char* dChunk,
+        const char* d_chunk,
         uint64_t chunkLength,
         uint8_t* d_output,
         cudaStream_t stream
     ) const {
-        (void)dChunk;
+        (void)d_chunk;
         const uint64_t chunkKmers = chunkLength - Config::k + 1;
         if (leaderCountHost_ == 0) {
             CUDA_CALL(cudaMemsetAsync(d_output, 0, chunkKmers * sizeof(uint8_t), stream));
@@ -1265,7 +1067,7 @@ __global__ void insertSequenceKernel(
     const uint64_t minimizerHash = minimizerHashes[leaderKmerIndex];
 
     using IndexType = std::conditional_t<Use32Index, uint32_t, uint64_t>;
-    const IndexType baseIndex = static_cast<IndexType>(leaderKmerIndex);
+    const auto baseIndex = static_cast<IndexType>(leaderKmerIndex);
 
     auto& shard = shards[static_cast<uint64_t>(minimizerHash) & (numShards - 1)];
 
