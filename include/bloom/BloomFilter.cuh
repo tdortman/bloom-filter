@@ -968,7 +968,7 @@ __global__ void preprocessSequenceKernel(
     for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
         const uint8_t encodedBase = encodeBase(sequence[blockStartKmer + idx]);
         sequenceTile[idx] = encodedBase;
-        localInvalidBase = localInvalidBase || (encodedBase > 3);
+        localInvalidBase |= (encodedBase > 3);
     }
     const bool blockAllValid = __syncthreads_count(localInvalidBase) == 0;
 
@@ -1051,7 +1051,7 @@ __global__ void preprocessSequenceKernel(
                 kmerValid = false;
                 break;
             }
-            minimizerHash = candidate < minimizerHash ? candidate : minimizerHash;
+            minimizerHash = min(candidate, minimizerHash);
         }
     }
 
