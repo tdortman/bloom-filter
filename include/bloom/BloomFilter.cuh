@@ -84,7 +84,6 @@ __global__ void preprocessSequenceKernel(
     uint64_t sequenceLength,
     uint64_t* minimizerHashes,
     uint64_t* smerPackedPositions,
-    uint8_t* validKmers,
     uint32_t* runLengths,
     uint64_t* leaderIndices,
     unsigned long long* leaderCount
@@ -757,9 +756,6 @@ class Filter {
         if (d_smerPackedPositions_ != nullptr) {
             cudaFree(d_smerPackedPositions_);
         }
-        if (d_validKmers_ != nullptr) {
-            cudaFree(d_validKmers_);
-        }
         if (d_runLengths_ != nullptr) {
             cudaFree(d_runLengths_);
         }
@@ -879,7 +875,6 @@ class Filter {
     mutable char* d_sequence_{};
     mutable uint64_t* d_minimizerHashes_{};
     mutable uint64_t* d_smerPackedPositions_{};
-    mutable uint8_t* d_validKmers_{};
     mutable uint32_t* d_runLengths_{};
     mutable uint64_t* d_leaderIndices_{};
     mutable unsigned long long* d_leaderCount_{};
@@ -934,9 +929,6 @@ class Filter {
         if (d_smerPackedPositions_ != nullptr) {
             CUDA_CALL(cudaFree(d_smerPackedPositions_));
         }
-        if (d_validKmers_ != nullptr) {
-            CUDA_CALL(cudaFree(d_validKmers_));
-        }
         if (d_runLengths_ != nullptr) {
             CUDA_CALL(cudaFree(d_runLengths_));
         }
@@ -948,7 +940,6 @@ class Filter {
             &d_smerPackedPositions_,
             (kmers + Config::findereSpan - 1) * Config::packedPositionWords * sizeof(uint64_t)
         ));
-        CUDA_CALL(cudaMalloc(&d_validKmers_, kmers * sizeof(uint8_t)));
         CUDA_CALL(cudaMalloc(&d_runLengths_, kmers * sizeof(uint32_t)));
         CUDA_CALL(cudaMalloc(&d_leaderIndices_, kmers * sizeof(uint64_t)));
         if (d_leaderCount_ == nullptr) {
@@ -1042,7 +1033,6 @@ class Filter {
             sequenceLength,
             d_minimizerHashes_,
             d_smerPackedPositions_,
-            d_validKmers_,
             d_runLengths_,
             d_leaderIndices_,
             d_leaderCount_
@@ -1067,7 +1057,6 @@ __global__ void preprocessSequenceKernel(
     uint64_t sequenceLength,
     uint64_t* minimizerHashes,
     uint64_t* smerPackedPositions,
-    uint8_t* validKmers,
     uint32_t* runLengths,
     uint64_t* leaderIndices,
     unsigned long long* leaderCount
@@ -1196,7 +1185,6 @@ __global__ void preprocessSequenceKernel(
     if (!kmerValid) {
         if (groupInRange) {
             minimizerHashes[groupIndex] = kInvalidHash;
-            validKmers[groupIndex] = 0;
             runLengths[groupIndex] = 0;
             hashTile[localKmerIndex] = kInvalidHash;
             validTile[localKmerIndex] = 0;
@@ -1204,7 +1192,6 @@ __global__ void preprocessSequenceKernel(
     } else {
         if (groupInRange) {
             minimizerHashes[groupIndex] = minimizerHash;
-            validKmers[groupIndex] = 1;
             hashTile[localKmerIndex] = minimizerHash;
             validTile[localKmerIndex] = 1;
         }
