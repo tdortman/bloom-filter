@@ -26,7 +26,7 @@ FILTER_COLORS = {
 }
 
 FILTER_DISPLAY_NAMES = {
-    "superbloom": "SuperBloom GPU",
+    "superbloom": "GPU SuperBloom",
     "cucobloom": "GPU Blocked Bloom",
 }
 
