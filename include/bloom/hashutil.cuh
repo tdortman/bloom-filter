@@ -54,7 +54,7 @@ __host__ __device__ __forceinline__ uint64_t rotl64(uint64_t x, int8_t r) {
 }
 
 template <typename T>
-__host__ __device__ __forceinline__ T load_chunk(const uint8_t* data, size_t index) {
+__host__ __device__ __forceinline__ T load_chunk(const uint8_t* data, uint64_t index) {
     T chunk;
     memcpy(&chunk, data + index * sizeof(T), sizeof(T));
     return chunk;
@@ -72,20 +72,20 @@ __host__ __device__ __forceinline__ uint64_t finalize(uint64_t h) {
 template <typename T>
 __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
     const auto* bytes = reinterpret_cast<const uint8_t*>(&key);
-    size_t size = sizeof(T);
-    size_t offset = 0;
+    uint64_t size = sizeof(T);
+    uint64_t offset = 0;
     uint64_t h64;
 
     // Process 32-byte chunks
     if (size >= 32) {
-        size_t limit = size - 32;
+        uint64_t limit = size - 32;
         uint64_t v1 = seed + PRIME64_1 + PRIME64_2;
         uint64_t v2 = seed + PRIME64_2;
         uint64_t v3 = seed;
         uint64_t v4 = seed - PRIME64_1;
 
         do {
-            const size_t pipeline_offset = offset / 8;
+            const uint64_t pipeline_offset = offset / 8;
             v1 += load_chunk<uint64_t>(bytes, pipeline_offset + 0) * PRIME64_2;
             v1 = rotl64(v1, 31);
             v1 *= PRIME64_1;

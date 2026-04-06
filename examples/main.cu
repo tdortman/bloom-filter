@@ -10,7 +10,7 @@
 
 namespace {
 
-std::string generateRandomDNA(size_t length, uint32_t seed) {
+std::string generateRandomDNA(uint64_t length, uint32_t seed) {
     static constexpr char bases[] = {'A', 'C', 'G', 'T'};
 
     std::mt19937 rng(seed);
@@ -58,9 +58,9 @@ int main(int argc, char** argv) {
     }
 
     bloom::Filter<Config> filter(filterBits, chunkBases);
-    const size_t inserted = filter.insertSequence(sequence);
+    const uint64_t inserted = filter.insertSequence(sequence);
     const auto hits = filter.containsSequence(query);
-    const size_t positives = std::count(hits.begin(), hits.end(), uint8_t{1});
+    const uint64_t positives = std::count(hits.begin(), hits.end(), uint8_t{1});
 
     std::cout << "Inserted k-mers: " << inserted << "\n";
     std::cout << "Query k-mers: " << hits.size() << "\n";

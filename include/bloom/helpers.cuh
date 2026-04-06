@@ -15,7 +15,7 @@ namespace bloom::detail {
  * @param n Number to check.
  * @return true if n is a power of two, false otherwise.
  */
-constexpr bool powerOfTwo(size_t n) {
+constexpr bool powerOfTwo(uint64_t n) {
     return n != 0 && (n & (n - 1)) == 0;
 }
 
@@ -30,9 +30,9 @@ __host__ __device__ __forceinline__ uint32_t globalThreadId() {
 /**
  * @brief Calculates the next power of two greater than or equal to n.
  * @param n Input number.
- * @return size_t Next power of two.
+ * @return uint64_t Next power of two.
  */
-constexpr size_t nextPowerOfTwo(size_t n) {
+constexpr uint64_t nextPowerOfTwo(uint64_t n) {
     if (powerOfTwo(n))
         return n;
 
@@ -53,12 +53,12 @@ constexpr size_t nextPowerOfTwo(size_t n) {
  * @tparam T Type of elements.
  * @param data Pointer to the array.
  * @param n Number of elements.
- * @return size_t Number of non-zero elements.
+ * @return uint64_t Number of non-zero elements.
  */
 template <typename T>
-size_t countOnes(T* data, size_t n) {
-    size_t count = 0;
-    for (size_t i = 0; i < n; ++i) {
+uint64_t countOnes(T* data, uint64_t n) {
+    uint64_t count = 0;
+    for (uint64_t i = 0; i < n; ++i) {
         if (data[i]) {
             count++;
         }
@@ -227,10 +227,10 @@ load256BitGlobalNC(const uint64_t* ptr, uint64_t& out0, uint64_t& out1, uint64_t
  * @param blockSize Block size (threads per block).
  * @param kernel The kernel function.
  * @param dynamicSMemSize Dynamic shared memory size per block.
- * @return size_t The calculated grid size (number of blocks).
+ * @return uint64_t The calculated grid size (number of blocks).
  */
 template <typename Kernel>
-constexpr size_t maxOccupancyGridSize(int32_t blockSize, Kernel kernel, size_t dynamicSMemSize) {
+constexpr uint64_t maxOccupancyGridSize(int32_t blockSize, Kernel kernel, uint64_t dynamicSMemSize) {
     int device = 0;
     cudaGetDevice(&device);
 

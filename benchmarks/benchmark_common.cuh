@@ -44,9 +44,9 @@ class GPUTimer {
 
 inline void setCommonCounters(
     benchmark::State& state,
-    size_t memoryBytes,
-    size_t itemsProcessed,
-    size_t sequenceBases
+    uint64_t memoryBytes,
+    uint64_t itemsProcessed,
+    uint64_t sequenceBases
 ) {
     state.SetItemsProcessed(static_cast<int64_t>(state.iterations() * itemsProcessed));
     state.counters["sequence_bases"] = benchmark::Counter(static_cast<double>(sequenceBases));
