@@ -1,4 +1,8 @@
-examples = {}
+examples = {
+    'bloom-main': {
+        'src': 'main.cu',
+    },
+}
 
 foreach name, config : examples
     executable(

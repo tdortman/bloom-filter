@@ -34,5 +34,5 @@ if get_option('BUILD_BENCHMARKS')
 endif
 
 if get_option('BUILD_TESTS')
-    # subdir('tests')
+    subdir('tests')
 endif

@@ -61,6 +61,7 @@ mkShell {
         - -D__CLANGD__
         - -I${cuda.path}/include
         - -I$(pwd)/include
+        - -I$(pwd)/subprojects/cuco/include
         - -I$(pwd)/subprojects/googletest-1.17.0/googletest/include
         - -D__LIBCUDAXX__STD_VER=${cuda.version.major}
         - -D__CUDACC_VER_MAJOR__=${cuda.version.major}

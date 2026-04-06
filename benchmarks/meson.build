@@ -2,9 +2,31 @@ benchmark_dep = subproject('google-benchmark').get_variable('google_benchmark_de
 
 cmake = import('cmake')
 
-bench_deps = [benchmark_dep]
+cuco_opts = cmake.subproject_options()
+cuco_opts.add_cmake_defines(
+    {
+        'CMAKE_BUILD_TYPE': 'Release',
+        'BUILD_TESTS': 'OFF',
+        'BUILD_TESTING': 'OFF',
+        'BUILD_BENCHMARKS': 'OFF',
+        'BUILD_EXAMPLES': 'OFF',
+        'INSTALL_CUCO': 'OFF',
+        'CUCO_ENABLE_EXPORTS': 'OFF',
+        'RAPIDS_ENABLE_EXPORTS': 'OFF',
+    },
+)
+cuco_dep = cmake.subproject('cuco', options: cuco_opts).dependency('cuco')
+
+bench_deps = [benchmark_dep, bloom_dep]
 
 benchmarks = {}
+
+benchmarks += {
+    'superbloom-vs-cuco-bloom': {
+        'src': 'superbloom_vs_cuco_bloom.cu',
+        'deps': [cuco_dep],
+    },
+}
 
 foreach name, config : benchmarks
     executable(
