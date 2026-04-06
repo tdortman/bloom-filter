@@ -96,7 +96,7 @@ __global__ void preprocessSequenceKernel(
     unsigned long long* leaderCount
 );
 
-template <typename Config, bool Use32Index>
+template <typename Config>
 __global__ void insertSequenceKernel(
     const uint64_t* minimizerHashes,
     const uint32_t* runLengths,
@@ -828,30 +828,16 @@ class Filter {
         const uint64_t groupsPerBlock = Config::cudaBlockSize / Config::insertGroupSize;
         const uint64_t gridSize = SDIV(leaderCountHost_, groupsPerBlock);
 
-        const uint64_t chunkKmers = chunkLength - Config::k + 1;
-        if (chunkKmers <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-            detail::insertSequenceKernel<Config, true>
-                <<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-                    d_minimizerHashes_,
-                    d_runLengths_,
-                    d_leaderIndices_,
-                    leaderCountHost_,
-                    d_smerPackedPositions_,
-                    numShards_,
-                    d_shards_
-                );
-        } else {
-            detail::insertSequenceKernel<Config, false>
-                <<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-                    d_minimizerHashes_,
-                    d_runLengths_,
-                    d_leaderIndices_,
-                    leaderCountHost_,
-                    d_smerPackedPositions_,
-                    numShards_,
-                    d_shards_
-                );
-        }
+        detail::insertSequenceKernel<Config>
+            <<<gridSize, Config::cudaBlockSize, 0, stream>>>(
+                d_minimizerHashes_,
+                d_runLengths_,
+                d_leaderIndices_,
+                leaderCountHost_,
+                d_smerPackedPositions_,
+                numShards_,
+                d_shards_
+            );
         CUDA_CALL(cudaGetLastError());
     }
 
@@ -1105,7 +1091,7 @@ __global__ void preprocessSequenceKernel(
     }
 }
 
-template <typename Config, bool Use32Index>
+template <typename Config>
 __global__ void insertSequenceKernel(
     const uint64_t* minimizerHashes,
     const uint32_t* runLengths,
@@ -1135,8 +1121,7 @@ __global__ void insertSequenceKernel(
     const uint64_t runLength = runLengths[leaderKmerIndex];
     const uint64_t minimizerHash = minimizerHashes[leaderKmerIndex];
 
-    using IndexType = std::conditional_t<Use32Index, uint32_t, uint64_t>;
-    const auto baseIndex = static_cast<IndexType>(leaderKmerIndex);
+    const uint64_t baseIndex = leaderKmerIndex;
 
     auto& shard = shards[static_cast<uint64_t>(minimizerHash) & (numShards - 1)];
 
@@ -1155,8 +1140,8 @@ __global__ void insertSequenceKernel(
             typename Config::WordType mask1 = 0;
             typename Config::WordType mask2 = 0;
             typename Config::WordType mask3 = 0;
-            const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerBase + lane);
-            const uint64_t sourceBase = static_cast<uint64_t>(smerIndex) * Config::packedPositionWords;
+            const uint64_t smerIndex = baseIndex + static_cast<uint64_t>(smerBase + lane);
+            const uint64_t sourceBase = smerIndex * Config::packedPositionWords;
             Filter<Config>::Shard::decodePackedPositionsToMasks4(
                 &smerPackedPositions[sourceBase], mask0, mask1, mask2, mask3
             );
@@ -1181,9 +1166,8 @@ __global__ void insertSequenceKernel(
             typename Config::WordType mask2 = 0;
             typename Config::WordType mask3 = 0;
             if (static_cast<uint64_t>(lane) < tailHashes) {
-                const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerBase + lane);
-                const uint64_t sourceBase =
-                    static_cast<uint64_t>(smerIndex) * Config::packedPositionWords;
+                const uint64_t smerIndex = baseIndex + static_cast<uint64_t>(smerBase + lane);
+                const uint64_t sourceBase = smerIndex * Config::packedPositionWords;
                 Filter<Config>::Shard::decodePackedPositionsToMasks4(
                     &smerPackedPositions[sourceBase], mask0, mask1, mask2, mask3
                 );
@@ -1205,9 +1189,8 @@ __global__ void insertSequenceKernel(
         }
     } else {
         for (uint64_t smerOffset = 0; smerOffset < smerCount; ++smerOffset) {
-            const IndexType smerIndex = baseIndex + static_cast<IndexType>(smerOffset);
-            const uint64_t sourceBase =
-                static_cast<uint64_t>(smerIndex) * Config::packedPositionWords;
+            const uint64_t smerIndex = baseIndex + smerOffset;
+            const uint64_t sourceBase = smerIndex * Config::packedPositionWords;
             wordMask |= Filter<Config>::Shard::wordMaskForPackedPositions(
                 &smerPackedPositions[sourceBase], static_cast<uint64_t>(lane)
             );
@@ -1468,7 +1451,7 @@ __global__ void containsSequenceFusedKernel(
     }
     __syncthreads();
 
-    const uint64_t localKmerIndex = static_cast<uint64_t>(threadIdx.x);
+    const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     if (localKmerIndex >= blockKmers) {
         return;
     }
