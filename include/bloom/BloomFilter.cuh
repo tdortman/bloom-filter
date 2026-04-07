@@ -518,6 +518,7 @@ class Filter {
 
         __device__ static void hashToWordMasks4(
             uint64_t baseHash,
+            WordType activeMask,
             WordType& mask0,
             WordType& mask1,
             WordType& mask2,
@@ -527,7 +528,7 @@ class Filter {
             detail::forEachHashIndex<Config>(
                 [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
                     const uint64_t address = bitAddress<HashIndex>(baseHash);
-                    const WordType bit = bitMask(address);
+                    const WordType bit = bitMask(address) & activeMask;
                     const uint64_t idx = wordIndex(address);
 
                     mask0 |= ((idx == 0) * bit);
@@ -536,6 +537,16 @@ class Filter {
                     mask3 |= ((idx == 3) * bit);
                 }
             );
+        }
+
+        __device__ static void hashToWordMasks4(
+            uint64_t baseHash,
+            WordType& mask0,
+            WordType& mask1,
+            WordType& mask2,
+            WordType& mask3
+        ) {
+            hashToWordMasks4(baseHash, ~WordType{0}, mask0, mask1, mask2, mask3);
         }
 
         [[nodiscard]] __device__ static bool containsMasksInRegisters4(
@@ -1594,11 +1605,9 @@ __global__ void insertSequenceFusedKernel(
         blockSmers
     );
 
-    // Phase 3: Each thread computes its minimizer and inserts its s-mers
+    // Each thread computes its minimizer and inserts its s-mers
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
-    if (localKmerIndex >= blockKmers) {
-        return;
-    }
+    const bool inRange = localKmerIndex < blockKmers;
 
     uint64_t minimizerHash = kInvalidHash;
     bool kmerValid = true;
@@ -1613,39 +1622,50 @@ __global__ void insertSequenceFusedKernel(
         minimizerHash = min(candidate, minimizerHash);
     }
 
-    if (!kmerValid) {
-        return;
-    }
+    const bool active = inRange && kmerValid;
+    const auto activeMask = static_cast<typename Config::WordType>(
+        typename Config::WordType{0} - static_cast<typename Config::WordType>(active)
+    );
 
-    auto& shard = shards[static_cast<uint64_t>(minimizerHash) & (numShards - 1)];
+    const uint64_t shardIndex = minimizerHash & (numShards - 1);
+    auto& shard = shards[shardIndex];
 
     typename Config::WordType wordMask0 = 0;
     typename Config::WordType wordMask1 = 0;
     typename Config::WordType wordMask2 = 0;
     typename Config::WordType wordMask3 = 0;
 
+    const uint64_t maxSmers =
+        inRange ? ((blockSmers - localKmerIndex) < Config::findereSpan
+                       ? (blockSmers - localKmerIndex)
+                       : Config::findereSpan)
+                : 0;
     for (uint32_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
-        const auto localSmerIdx = static_cast<uint32_t>(localKmerIndex + smerOffset);
-        if (localSmerIdx >= blockSmers) {
-            break;
-        }
-
-        const uint64_t smerHash = smerHashes[localSmerIdx];
-        if (smerHash == kInvalidHash) {
-            continue;
-        }
+        const bool laneHasSmer = smerOffset < maxSmers;
+        const uint64_t localSmerIdx = localKmerIndex + smerOffset;
+        const uint64_t rawSmerHash = laneHasSmer ? smerHashes[localSmerIdx] : kInvalidHash;
+        const bool laneUsesSmer = active && rawSmerHash != kInvalidHash;
+        const auto laneActiveMask = static_cast<typename Config::WordType>(
+            typename Config::WordType{0} - static_cast<typename Config::WordType>(laneUsesSmer)
+        );
 
         Filter<Config>::Shard::hashToWordMasks4(
-            smerHash, wordMask0, wordMask1, wordMask2, wordMask3
+            rawSmerHash, laneActiveMask, wordMask0, wordMask1, wordMask2, wordMask3
         );
     }
 
-    // clang-format off
-    if (wordMask0 != 0) { atomicOrWord(&shard.words[0], wordMask0); }
-    if (wordMask1 != 0) { atomicOrWord(&shard.words[1], wordMask1); }
-    if (wordMask2 != 0) { atomicOrWord(&shard.words[2], wordMask2); }
-    if (wordMask3 != 0) { atomicOrWord(&shard.words[3], wordMask3); }
-    // clang-format on
+    if (wordMask0 != 0) {
+        atomicOrWord(&shard.words[0], wordMask0);
+    }
+    if (wordMask1 != 0) {
+        atomicOrWord(&shard.words[1], wordMask1);
+    }
+    if (wordMask2 != 0) {
+        atomicOrWord(&shard.words[2], wordMask2);
+    }
+    if (wordMask3 != 0) {
+        atomicOrWord(&shard.words[3], wordMask3);
+    }
 }
 
 }  // namespace detail
