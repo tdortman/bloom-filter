@@ -131,7 +131,6 @@ __global__ void containsSequenceFusedKernel(
 template <typename Config>
 __device__ __forceinline__ bool prepareSequenceHashTiles(
     const char* sequence,
-    uint64_t sequenceLength,
     uint64_t blockStartKmer,
     uint64_t blockKmers,
     uint64_t numSmers,
@@ -297,10 +296,10 @@ template <uint64_t Length, typename EncodedType>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 packEncodedWindowUnchecked(const EncodedType* sequence, uint64_t start) {
     uint64_t packed = 0;
-    _Pragma("unroll")
+    // _Pragma("unroll")
     for (uint64_t i = 0; i < Length; ++i) {
-        packed =
-            (packed << 2) | static_cast<uint64_t>(static_cast<uint8_t>(sequence[start + i]) & 0x3u);
+        packed = (packed << 2) |
+                 (static_cast<uint64_t>(static_cast<uint8_t>(sequence[start + i]) & 0x3u));
     }
     return packed;
 }
@@ -346,46 +345,6 @@ template <typename WordType>
         return static_cast<uint64_t>(__builtin_popcount(static_cast<unsigned int>(value)));
     }
 #endif
-}
-
-template <typename Config>
-[[nodiscard]] __device__ __forceinline__ uint64_t
-minimizerHashDirect(const char* sequence, uint64_t kmerStart) {
-    uint64_t packedMmer = 0;
-    if (!encodeWindow<Config::m>(sequence, kmerStart, packedMmer)) {
-        return kInvalidHash;
-    }
-
-    uint64_t minimumHash = xxhash::xxhash64(packedMmer);
-    _Pragma("unroll")
-    for (int offset = 1; offset < static_cast<int>(Config::minimizerSpan); ++offset) {
-        const uint8_t encoded =
-            encodeBase(sequence[kmerStart + static_cast<uint64_t>(offset) + Config::m - 1]);
-        if (encoded > 3) {
-            return kInvalidHash;
-        }
-        packedMmer = rollPackedWindow<Config::m>(packedMmer, encoded);
-        const uint64_t candidate = xxhash::xxhash64(packedMmer);
-        minimumHash = candidate < minimumHash ? candidate : minimumHash;
-    }
-
-    return minimumHash;
-}
-
-template <typename Config, typename Tile>
-[[nodiscard]] __device__ __forceinline__ uint64_t
-minimizerHashBatchReuse(const Tile& tile, uint64_t laneHash, const uint64_t* tailHashes) {
-    uint64_t minimizerHash = kInvalidHash;
-    const int lane = static_cast<int>(tile.thread_rank());
-    const int tileSize = static_cast<int>(tile.size());
-    _Pragma("unroll")
-    for (int offset = 0; offset < static_cast<int>(Config::minimizerSpan); ++offset) {
-        const int sourceLane = lane + offset;
-        const auto candidate = sourceLane < tileSize ? tile.shfl(laneHash, sourceLane)
-                                                     : tailHashes[sourceLane - tileSize];
-        minimizerHash = candidate < minimizerHash ? candidate : minimizerHash;
-    }
-    return minimizerHash;
 }
 
 }  // namespace detail
@@ -448,10 +407,6 @@ class Filter {
             WordType& mask3
         ) {
             static_assert(wordCount == 4, "decodePackedPositionsToMasks4 requires four words");
-            mask0 = 0;
-            mask1 = 0;
-            mask2 = 0;
-            mask3 = 0;
 
             detail::forEachHashIndex<Config>(
                 [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
@@ -461,14 +416,11 @@ class Filter {
                         static_cast<uint64_t>((packedPositions[packIndex] >> shift) & 0xFFu);
                     const WordType bit = bitMask(address);
                     const uint64_t idx = wordIndex(address);
-                    const WordType sel0 = WordType{0} - static_cast<WordType>(idx == 0);
-                    const WordType sel1 = WordType{0} - static_cast<WordType>(idx == 1);
-                    const WordType sel2 = WordType{0} - static_cast<WordType>(idx == 2);
-                    const WordType sel3 = WordType{0} - static_cast<WordType>(idx == 3);
-                    mask0 |= bit & sel0;
-                    mask1 |= bit & sel1;
-                    mask2 |= bit & sel2;
-                    mask3 |= bit & sel3;
+
+                    mask0 |= ((idx == 0) * bit);
+                    mask1 |= ((idx == 1) * bit);
+                    mask2 |= ((idx == 2) * bit);
+                    mask3 |= ((idx == 3) * bit);
                 }
             );
         }
@@ -530,8 +482,10 @@ class Filter {
                     const auto address =
                         static_cast<uint64_t>((packedPositions[packIndex] >> shift) & 0xFFu);
                     const uint64_t idx = wordIndex(address);
-                    const WordType word =
-                        idx == 0 ? word0 : (idx == 1 ? word1 : (idx == 2 ? word2 : word3));
+
+                    const WordType word = (idx == 0) * word0 + (idx == 1) * word1 +
+                                          (idx == 2) * word2 + (idx == 3) * word3;
+
                     present = ((word & bitMask(address)) != 0);
                 }
             );
@@ -554,8 +508,8 @@ class Filter {
                     }
                     const uint64_t address = bitAddress<HashIndex>(baseHash);
                     const uint64_t idx = wordIndex(address);
-                    const WordType word =
-                        idx == 0 ? word0 : (idx == 1 ? word1 : (idx == 2 ? word2 : word3));
+                    const WordType word = (idx == 0) * word0 + (idx == 1) * word1 +
+                                          (idx == 2) * word2 + (idx == 3) * word3;
                     present = ((word & bitMask(address)) != 0);
                 }
             );
@@ -575,15 +529,11 @@ class Filter {
                     const uint64_t address = bitAddress<HashIndex>(baseHash);
                     const WordType bit = bitMask(address);
                     const uint64_t idx = wordIndex(address);
-                    if (idx == 0) {
-                        mask0 |= bit;
-                    } else if (idx == 1) {
-                        mask1 |= bit;
-                    } else if (idx == 2) {
-                        mask2 |= bit;
-                    } else {
-                        mask3 |= bit;
-                    }
+
+                    mask0 |= ((idx == 0) * bit);
+                    mask1 |= ((idx == 1) * bit);
+                    mask2 |= ((idx == 2) * bit);
+                    mask3 |= ((idx == 3) * bit);
                 }
             );
         }
@@ -631,8 +581,7 @@ class Filter {
         std::is_same_v<typename Config::WordType, uint64_t>;
     static constexpr bool useFusedQueryPath = fusedQueryKernelSupported;
     static constexpr bool fusedInsertKernelSupported =
-        Config::blockWordCount == 4 &&
-        std::is_same_v<typename Config::WordType, uint64_t>;
+        Config::blockWordCount == 4 && std::is_same_v<typename Config::WordType, uint64_t>;
     static constexpr bool useFusedInsertPath = fusedInsertKernelSupported;
 
     explicit Filter(uint64_t requestedFilterBits, uint64_t chunkBases = defaultChunkBases)
@@ -877,22 +826,22 @@ class Filter {
 
     void launchInsert(const char* d_chunk, uint64_t chunkLength, cudaStream_t stream) {
         (void)d_chunk;
+        (void)chunkLength;
         if (leaderCountHost_ == 0) {
             return;
         }
         const uint64_t groupsPerBlock = Config::cudaBlockSize / Config::insertGroupSize;
         const uint64_t gridSize = SDIV(leaderCountHost_, groupsPerBlock);
 
-        detail::insertSequenceKernel<Config>
-            <<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-                d_minimizerHashes_,
-                d_runLengths_,
-                d_leaderIndices_,
-                leaderCountHost_,
-                d_smerPackedPositions_,
-                numShards_,
-                d_shards_
-            );
+        detail::insertSequenceKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
+            d_minimizerHashes_,
+            d_runLengths_,
+            d_leaderIndices_,
+            leaderCountHost_,
+            d_smerPackedPositions_,
+            numShards_,
+            d_shards_
+        );
         CUDA_CALL(cudaGetLastError());
     }
 
@@ -903,13 +852,9 @@ class Filter {
         const uint64_t numKmers = sequenceLength - Config::k + 1;
         const uint64_t gridSize = SDIV(numKmers, Config::cudaBlockSize);
 
-        detail::insertSequenceFusedKernel<Config>
-            <<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-                d_sequence,
-                sequenceLength,
-                numShards_,
-                d_shards_
-            );
+        detail::insertSequenceFusedKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
+            d_sequence, sequenceLength, numShards_, d_shards_
+        );
         CUDA_CALL(cudaGetLastError());
     }
 
@@ -1224,8 +1169,10 @@ __global__ void insertSequenceKernel(
                 const auto srcMask1 = tile.shfl(mask1, src);
                 const auto srcMask2 = tile.shfl(mask2, src);
                 const auto srcMask3 = tile.shfl(mask3, src);
-                const auto srcMask =
-                    lane == 0 ? srcMask0 : (lane == 1 ? srcMask1 : (lane == 2 ? srcMask2 : srcMask3));
+
+                const auto srcMask = (lane == 0) * srcMask0 + (lane == 1) * srcMask1 +
+                                     (lane == 2) * srcMask2 + (lane == 3) * srcMask3;
+
                 wordMask |= srcMask;
             }
         }
@@ -1251,11 +1198,12 @@ __global__ void insertSequenceKernel(
                 const auto srcMask1 = tile.shfl(mask1, src);
                 const auto srcMask2 = tile.shfl(mask2, src);
                 const auto srcMask3 = tile.shfl(mask3, src);
-                const auto srcMask =
-                    lane == 0 ? srcMask0 : (lane == 1 ? srcMask1 : (lane == 2 ? srcMask2 : srcMask3));
-                const auto srcActive = static_cast<typename Config::WordType>(
-                    static_cast<uint64_t>(src) < tailHashes
-                );
+
+                const auto srcMask = (lane == 0) * srcMask0 + (lane == 1) * srcMask1 +
+                                     (lane == 2) * srcMask2 + (lane == 3) * srcMask3;
+
+                const auto srcActive =
+                    static_cast<typename Config::WordType>(static_cast<uint64_t>(src) < tailHashes);
                 wordMask |= srcMask & (typename Config::WordType{0} - srcActive);
             }
         }
@@ -1484,7 +1432,6 @@ __global__ void containsSequenceFusedKernel(
     uint64_t blockSmers = 0;
     prepareSequenceHashTiles<Config>(
         sequence,
-        sequenceLength,
         blockStartKmer,
         blockKmers,
         numSmers,
@@ -1510,7 +1457,7 @@ __global__ void containsSequenceFusedKernel(
             kmerValid = false;
             break;
         }
-        minimizerHash = candidate < minimizerHash ? candidate : minimizerHash;
+        minimizerHash = min(candidate, minimizerHash);
     }
 
     if (!kmerValid) {
@@ -1524,7 +1471,9 @@ __global__ void containsSequenceFusedKernel(
     typename Config::WordType word3 = 0;
 
 #if __CUDA_ARCH__ >= 1000
-    detail::load256BitGlobalNC(shards[minimizerHash & (numShards - 1)].words, word0, word1, word2, word3);
+    detail::load256BitGlobalNC(
+        shards[minimizerHash & (numShards - 1)].words, word0, word1, word2, word3
+    );
 #else
     const auto& shard = shards[minimizerHash & (numShards - 1)];
     word0 = shard.words[0];
@@ -1541,7 +1490,9 @@ __global__ void containsSequenceFusedKernel(
             present = false;
             break;
         }
-        if (!Filter<Config>::Shard::containsHashInRegisters4(word0, word1, word2, word3, baseHash)) {
+        if (!Filter<Config>::Shard::containsHashInRegisters4(
+                word0, word1, word2, word3, baseHash
+            )) {
             present = false;
             break;
         }
@@ -1552,7 +1503,6 @@ __global__ void containsSequenceFusedKernel(
 template <typename Config>
 __device__ __forceinline__ bool prepareSequenceHashTiles(
     const char* sequence,
-    uint64_t sequenceLength,
     uint64_t blockStartKmer,
     uint64_t blockKmers,
     uint64_t numSmers,
@@ -1635,7 +1585,6 @@ __global__ void insertSequenceFusedKernel(
     uint64_t blockSmers = 0;
     prepareSequenceHashTiles<Config>(
         sequence,
-        sequenceLength,
         blockStartKmer,
         blockKmers,
         numSmers,
@@ -1653,6 +1602,7 @@ __global__ void insertSequenceFusedKernel(
 
     uint64_t minimizerHash = kInvalidHash;
     bool kmerValid = true;
+
     _Pragma("unroll")
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t candidate = mmerHashes[localKmerIndex + offset];
@@ -1660,7 +1610,7 @@ __global__ void insertSequenceFusedKernel(
             kmerValid = false;
             break;
         }
-        minimizerHash = candidate < minimizerHash ? candidate : minimizerHash;
+        minimizerHash = min(candidate, minimizerHash);
     }
 
     if (!kmerValid) {
@@ -1675,7 +1625,7 @@ __global__ void insertSequenceFusedKernel(
     typename Config::WordType wordMask3 = 0;
 
     for (uint32_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
-        const uint32_t localSmerIdx = static_cast<uint32_t>(localKmerIndex + smerOffset);
+        const auto localSmerIdx = static_cast<uint32_t>(localKmerIndex + smerOffset);
         if (localSmerIdx >= blockSmers) {
             break;
         }
@@ -1685,13 +1635,17 @@ __global__ void insertSequenceFusedKernel(
             continue;
         }
 
-        Filter<Config>::Shard::hashToWordMasks4(smerHash, wordMask0, wordMask1, wordMask2, wordMask3);
+        Filter<Config>::Shard::hashToWordMasks4(
+            smerHash, wordMask0, wordMask1, wordMask2, wordMask3
+        );
     }
 
+    // clang-format off
     if (wordMask0 != 0) { atomicOrWord(&shard.words[0], wordMask0); }
     if (wordMask1 != 0) { atomicOrWord(&shard.words[1], wordMask1); }
     if (wordMask2 != 0) { atomicOrWord(&shard.words[2], wordMask2); }
     if (wordMask3 != 0) { atomicOrWord(&shard.words[3], wordMask3); }
+    // clang-format on
 }
 
 }  // namespace detail
