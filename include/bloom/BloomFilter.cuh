@@ -129,6 +129,19 @@ __global__ void containsSequenceFusedKernel(
 );
 
 template <typename Config>
+__device__ __forceinline__ bool prepareSequenceHashTiles(
+    const char* sequence,
+    uint64_t sequenceLength,
+    uint64_t blockStartKmer,
+    uint64_t blockKmers,
+    uint64_t numSmers,
+    uint8_t* sequenceTile,
+    uint64_t* mmerHashes,
+    uint64_t* smerHashes,
+    uint64_t& blockSmers
+);
+
+template <typename Config>
 __global__ void insertSequenceFusedKernel(
     const char* sequence,
     uint64_t sequenceLength,
@@ -1468,47 +1481,18 @@ __global__ void containsSequenceFusedKernel(
 
     const uint64_t blockKmers =
         min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
-    const uint64_t tileBases = blockKmers + Config::k - 1;
-
-    bool localInvalidBase = false;
-    for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
-        const uint8_t encodedBase = encodeBase(sequence[blockStartKmer + idx]);
-        sequenceTile[idx] = encodedBase;
-        localInvalidBase = localInvalidBase || (encodedBase > 3);
-    }
-    const bool blockAllValid = __syncthreads_count(localInvalidBase) == 0;
-
-    const uint64_t blockMmers = blockKmers + Config::minimizerSpan - 1;
-    for (uint64_t idx = threadIdx.x; idx < blockMmers; idx += Config::cudaBlockSize) {
-        if (blockAllValid) {
-            const uint64_t packedMmer = packEncodedWindowUnchecked<Config::m>(sequenceTile, idx);
-            mmerHashes[idx] = xxhash::xxhash64(packedMmer);
-        } else {
-            uint64_t packedMmer = 0;
-            if (!encodeWindow<Config::m>(sequenceTile, idx, packedMmer)) {
-                mmerHashes[idx] = kInvalidHash;
-            } else {
-                mmerHashes[idx] = xxhash::xxhash64(packedMmer);
-            }
-        }
-    }
-
-    const uint64_t blockSmers =
-        min(blockKmers + Config::findereSpan - 1, numSmers - blockStartKmer);
-    for (uint64_t idx = threadIdx.x; idx < blockSmers; idx += Config::cudaBlockSize) {
-        if (blockAllValid) {
-            const uint64_t packedSmer = packEncodedWindowUnchecked<Config::s>(sequenceTile, idx);
-            smerHashes[idx] = xxhash::xxhash64(packedSmer);
-        } else {
-            uint64_t packedSmer = 0;
-            if (!encodeWindow<Config::s>(sequenceTile, idx, packedSmer)) {
-                smerHashes[idx] = kInvalidHash;
-            } else {
-                smerHashes[idx] = xxhash::xxhash64(packedSmer);
-            }
-        }
-    }
-    __syncthreads();
+    uint64_t blockSmers = 0;
+    prepareSequenceHashTiles<Config>(
+        sequence,
+        sequenceLength,
+        blockStartKmer,
+        blockKmers,
+        numSmers,
+        sequenceTile,
+        mmerHashes,
+        smerHashes,
+        blockSmers
+    );
 
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     if (localKmerIndex >= blockKmers) {
@@ -1566,6 +1550,61 @@ __global__ void containsSequenceFusedKernel(
 }
 
 template <typename Config>
+__device__ __forceinline__ bool prepareSequenceHashTiles(
+    const char* sequence,
+    uint64_t sequenceLength,
+    uint64_t blockStartKmer,
+    uint64_t blockKmers,
+    uint64_t numSmers,
+    uint8_t* sequenceTile,
+    uint64_t* mmerHashes,
+    uint64_t* smerHashes,
+    uint64_t& blockSmers
+) {
+    const uint64_t tileBases = blockKmers + Config::k - 1;
+
+    bool localInvalidBase = false;
+    for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
+        const uint8_t encodedBase = encodeBase(sequence[blockStartKmer + idx]);
+        sequenceTile[idx] = encodedBase;
+        localInvalidBase = localInvalidBase || (encodedBase > 3);
+    }
+    const bool blockAllValid = __syncthreads_count(localInvalidBase) == 0;
+
+    const uint64_t blockMmers = blockKmers + Config::minimizerSpan - 1;
+    for (uint64_t idx = threadIdx.x; idx < blockMmers; idx += Config::cudaBlockSize) {
+        if (blockAllValid) {
+            const uint64_t packedMmer = packEncodedWindowUnchecked<Config::m>(sequenceTile, idx);
+            mmerHashes[idx] = xxhash::xxhash64(packedMmer);
+        } else {
+            uint64_t packedMmer = 0;
+            if (!encodeWindow<Config::m>(sequenceTile, idx, packedMmer)) {
+                mmerHashes[idx] = kInvalidHash;
+            } else {
+                mmerHashes[idx] = xxhash::xxhash64(packedMmer);
+            }
+        }
+    }
+
+    blockSmers = min(blockKmers + Config::findereSpan - 1, numSmers - blockStartKmer);
+    for (uint64_t idx = threadIdx.x; idx < blockSmers; idx += Config::cudaBlockSize) {
+        if (blockAllValid) {
+            const uint64_t packedSmer = packEncodedWindowUnchecked<Config::s>(sequenceTile, idx);
+            smerHashes[idx] = xxhash::xxhash64(packedSmer);
+        } else {
+            uint64_t packedSmer = 0;
+            if (!encodeWindow<Config::s>(sequenceTile, idx, packedSmer)) {
+                smerHashes[idx] = kInvalidHash;
+            } else {
+                smerHashes[idx] = xxhash::xxhash64(packedSmer);
+            }
+        }
+    }
+    __syncthreads();
+    return blockAllValid;
+}
+
+template <typename Config>
 __global__ void insertSequenceFusedKernel(
     const char* sequence,
     uint64_t sequenceLength,
@@ -1593,51 +1632,18 @@ __global__ void insertSequenceFusedKernel(
 
     const uint64_t blockKmers =
         min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
-    const uint64_t tileBases = blockKmers + Config::k - 1;
-
-    // Phase 1: Load and encode the sequence tile into shared memory
-    bool localInvalidBase = false;
-    for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
-        const uint8_t encodedBase = encodeBase(sequence[blockStartKmer + idx]);
-        sequenceTile[idx] = encodedBase;
-        localInvalidBase = localInvalidBase || (encodedBase > 3);
-    }
-    const bool blockAllValid = __syncthreads_count(localInvalidBase) == 0;
-
-    // Phase 2: Compute mmer hashes
-    const uint64_t blockMmers = blockKmers + Config::minimizerSpan - 1;
-    for (uint64_t idx = threadIdx.x; idx < blockMmers; idx += Config::cudaBlockSize) {
-        if (blockAllValid) {
-            const uint64_t packedMmer = packEncodedWindowUnchecked<Config::m>(sequenceTile, idx);
-            mmerHashes[idx] = xxhash::xxhash64(packedMmer);
-        } else {
-            uint64_t packedMmer = 0;
-            if (!encodeWindow<Config::m>(sequenceTile, idx, packedMmer)) {
-                mmerHashes[idx] = kInvalidHash;
-            } else {
-                mmerHashes[idx] = xxhash::xxhash64(packedMmer);
-            }
-        }
-    }
-    __syncthreads();
-
-    const uint64_t blockSmers =
-        min(blockKmers + Config::findereSpan - 1, numSmers - blockStartKmer);
-
-    for (uint32_t idx = threadIdx.x; idx < blockSmers; idx += Config::cudaBlockSize) {
-        if (blockAllValid) {
-            const uint64_t packedSmer = packEncodedWindowUnchecked<Config::s>(sequenceTile, idx);
-            smerHashes[idx] = xxhash::xxhash64(packedSmer);
-        } else {
-            uint64_t packedSmer = 0;
-            if (!encodeWindow<Config::s>(sequenceTile, idx, packedSmer)) {
-                smerHashes[idx] = kInvalidHash;
-            } else {
-                smerHashes[idx] = xxhash::xxhash64(packedSmer);
-            }
-        }
-    }
-    __syncthreads();
+    uint64_t blockSmers = 0;
+    prepareSequenceHashTiles<Config>(
+        sequence,
+        sequenceLength,
+        blockStartKmer,
+        blockKmers,
+        numSmers,
+        sequenceTile,
+        mmerHashes,
+        smerHashes,
+        blockSmers
+    );
 
     // Phase 3: Each thread computes its minimizer and inserts its s-mers
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
@@ -1661,8 +1667,6 @@ __global__ void insertSequenceFusedKernel(
         return;
     }
 
-    // Each valid k-mer thread computes word masks for its findereSpan s-mers
-    // and atomicOr them into the target shard
     auto& shard = shards[static_cast<uint64_t>(minimizerHash) & (numShards - 1)];
 
     typename Config::WordType wordMask0 = 0;
@@ -1684,7 +1688,6 @@ __global__ void insertSequenceFusedKernel(
         Filter<Config>::Shard::hashToWordMasks4(smerHash, wordMask0, wordMask1, wordMask2, wordMask3);
     }
 
-    // Issue atomicOr for each word that has bits set
     if (wordMask0 != 0) { atomicOrWord(&shard.words[0], wordMask0); }
     if (wordMask1 != 0) { atomicOrWord(&shard.words[1], wordMask1); }
     if (wordMask2 != 0) { atomicOrWord(&shard.words[2], wordMask2); }
