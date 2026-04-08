@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "Fastx.hpp"
 #include "hashutil.cuh"
 #include "helpers.cuh"
 
@@ -665,6 +666,16 @@ class Filter {
         return insertSequence(sequence.data(), sequence.size(), stream);
     }
 
+    [[nodiscard]] FastxInsertReport insertFastx(std::istream& input, cudaStream_t stream = {}) {
+        return insertFastxStream(input, "<stream>", stream);
+    }
+
+    [[nodiscard]] FastxInsertReport
+    insertFastxFile(std::string_view path, cudaStream_t stream = {}) {
+        auto input = detail::openFastxFile(path);
+        return insertFastxStream(input, path, stream);
+    }
+
     void containsSequence(
         const char* sequence,
         uint64_t length,
@@ -714,6 +725,16 @@ class Filter {
     [[nodiscard]] std::vector<uint8_t>
     containsSequence(std::string_view sequence, cudaStream_t stream = {}) const {
         return containsSequence(sequence.data(), sequence.size(), stream);
+    }
+
+    [[nodiscard]] FastxQueryReport queryFastx(std::istream& input, cudaStream_t stream = {}) const {
+        return queryFastxStream(input, "<stream>", stream);
+    }
+
+    [[nodiscard]] FastxQueryReport
+    queryFastxFile(std::string_view path, cudaStream_t stream = {}) const {
+        auto input = detail::openFastxFile(path);
+        return queryFastxStream(input, path, stream);
     }
 
     void clear(cudaStream_t stream = {}) {
@@ -775,6 +796,37 @@ class Filter {
 
     [[nodiscard]] uint64_t sizeBytes() const {
         return shardCount() * sizeof(Shard);
+    }
+
+    [[nodiscard]] FastxInsertReport
+    insertFastxStream(std::istream& input, std::string_view sourceName, cudaStream_t stream) {
+        detail::FastxReader reader(input, sourceName);
+        detail::FastxRecord record;
+        FastxInsertReport report;
+
+        while (reader.nextRecord(record)) {
+            ++report.recordsIndexed;
+            report.indexedBases += record.sequence.size();
+            report.insertedKmers += insertSequence(record.sequence, stream);
+        }
+        return report;
+    }
+
+    [[nodiscard]] FastxQueryReport
+    queryFastxStream(std::istream& input, std::string_view sourceName, cudaStream_t stream) const {
+        detail::FastxReader reader(input, sourceName);
+        detail::FastxRecord record;
+        FastxQueryReport report;
+
+        while (reader.nextRecord(record)) {
+            ++report.recordsQueried;
+            report.queriedBases += record.sequence.size();
+
+            const auto hits = containsSequence(record.sequence, stream);
+            report.queriedKmers += hits.size();
+            report.positiveKmers += std::count(hits.begin(), hits.end(), uint8_t{1});
+        }
+        return report;
     }
 
     void ensureSequenceCapacity(uint64_t bases) const {

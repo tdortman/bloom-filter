@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <random>
+#include <sstream>
 #include <string>
+#include <string_view>
 
 #include <bloom/BloomFilter.cuh>
-
-namespace {
 
 std::string generateRandomDNA(uint64_t length, uint32_t seed) {
     static constexpr char bases[] = {'A', 'C', 'G', 'T'};
@@ -23,7 +24,38 @@ std::string generateRandomDNA(uint64_t length, uint32_t seed) {
     return sequence;
 }
 
-}  // namespace
+std::string wrapLines(std::string_view text, uint64_t lineLength) {
+    const uint64_t width = std::max<uint64_t>(1, lineLength);
+    std::string wrapped;
+    wrapped.reserve(text.size() + text.size() / width + 1);
+
+    if (text.empty()) {
+        wrapped.push_back('\n');
+        return wrapped;
+    }
+
+    for (uint64_t offset = 0; offset < text.size(); offset += width) {
+        const auto chunk = std::min<uint64_t>(width, text.size() - offset);
+        wrapped.append(text.substr(offset, chunk));
+        wrapped.push_back('\n');
+    }
+    return wrapped;
+}
+
+std::string makeFastaRecord(std::string_view name, std::string_view sequence, uint64_t lineLength) {
+    std::string record = ">" + std::string(name) + "\n";
+    record += wrapLines(sequence, lineLength);
+    return record;
+}
+
+std::string makeFastqRecord(std::string_view name, std::string_view sequence, uint64_t lineLength) {
+    std::string quality(sequence.size(), 'I');
+    std::string record = "@" + std::string(name) + "\n";
+    record += wrapLines(sequence, lineLength);
+    record += "+\n";
+    record += wrapLines(quality, lineLength);
+    return record;
+}
 
 int main(int argc, char** argv) {
     using Config = bloom::Config<31, 21, 27, 6, 256, 512>;
@@ -32,40 +64,124 @@ int main(int argc, char** argv) {
 
     std::string sequence;
     std::string query;
+    std::string sequenceFastxPath;
+    std::string queryFastxPath;
     uint64_t filterBits = 1ULL << 24;
     uint64_t chunkBases = bloom::Filter<Config>::defaultChunkBases;
     uint64_t sequenceLength = 1ULL << 16;
     uint32_t seed = 42;
 
-    app.add_option("sequence", sequence, "Sequence to insert into the filter (optional if --length is used)");
-    app.add_option("query", query, "Sequence to query (defaults to the inserted sequence)");
+    auto* sequenceOption = app.add_option(
+        "sequence",
+        sequence,
+        "Raw DNA sequence to insert into the filter (optional if --length or --sequence-fastx is "
+        "used)"
+    );
+    auto* queryOption = app.add_option(
+        "query", query, "Raw DNA sequence to query (defaults to the inserted input)"
+    );
+    auto* sequenceFastxOption =
+        app.add_option("--sequence-fastx", sequenceFastxPath, "FASTA/FASTQ file to insert");
+    auto* queryFastxOption =
+        app.add_option("--query-fastx", queryFastxPath, "FASTA/FASTQ file to query");
     app.add_option("--length", sequenceLength, "Generate a random DNA sequence of this length")
         ->default_val(sequenceLength);
     app.add_option("--seed", seed, "Random seed for generated DNA")->default_val(seed);
-    app.add_option("--filter-bits", filterBits, "Total bloom-filter bits before power-of-two rounding")
+    app.add_option(
+           "--filter-bits", filterBits, "Total bloom-filter bits before power-of-two rounding"
+    )
         ->default_val(filterBits);
     app.add_option("--chunk-bases", chunkBases, "Host-to-GPU chunk size in bases")
         ->default_val(chunkBases);
 
+    sequenceFastxOption->excludes(sequenceOption);
+    queryFastxOption->excludes(queryOption);
+
     CLI11_PARSE(app, argc, argv);
 
-    if (sequence.empty()) {
+    const bool useSequenceFastx = !sequenceFastxPath.empty();
+    const bool useRawSequence = !useSequenceFastx && !sequence.empty();
+    const bool useGeneratedFastx = !useSequenceFastx && !useRawSequence;
+
+    if (useGeneratedFastx) {
         sequence = generateRandomDNA(sequenceLength, seed);
     }
 
-    if (query.empty()) {
-        query = sequence;
+    try {
+        bloom::Filter<Config> filter(filterBits, chunkBases);
+
+        uint64_t inserted = 0;
+        uint64_t queryKmers = 0;
+        uint64_t positives = 0;
+        uint64_t insertedBases = 0;
+        uint64_t queriedBases = 0;
+        uint64_t insertedRecords = 0;
+        uint64_t queriedRecords = 0;
+
+        if (useSequenceFastx) {
+            const auto report = filter.insertFastxFile(sequenceFastxPath);
+            inserted = report.insertedKmers;
+            insertedBases = report.indexedBases;
+            insertedRecords = report.recordsIndexed;
+        } else if (useRawSequence) {
+            inserted = filter.insertSequence(sequence);
+            insertedBases = sequence.size();
+            insertedRecords = 1;
+        } else {
+            std::istringstream inputFastx(makeFastaRecord("generated-insert", sequence, 73));
+            const auto report = filter.insertFastx(inputFastx);
+            inserted = report.insertedKmers;
+            insertedBases = report.indexedBases;
+            insertedRecords = report.recordsIndexed;
+        }
+
+        if (!queryFastxPath.empty()) {
+            const auto report = filter.queryFastxFile(queryFastxPath);
+            queryKmers = report.queriedKmers;
+            positives = report.positiveKmers;
+            queriedBases = report.queriedBases;
+            queriedRecords = report.recordsQueried;
+        } else if (!query.empty()) {
+            const auto hits = filter.containsSequence(query);
+            queryKmers = hits.size();
+            positives = std::count(hits.begin(), hits.end(), uint8_t{1});
+            queriedBases = query.size();
+            queriedRecords = 1;
+        } else if (useSequenceFastx) {
+            const auto report = filter.queryFastxFile(sequenceFastxPath);
+            queryKmers = report.queriedKmers;
+            positives = report.positiveKmers;
+            queriedBases = report.queriedBases;
+            queriedRecords = report.recordsQueried;
+        } else if (useGeneratedFastx) {
+            std::istringstream queryFastx(makeFastqRecord("generated-query", sequence, 59));
+            const auto report = filter.queryFastx(queryFastx);
+            queryKmers = report.queriedKmers;
+            positives = report.positiveKmers;
+            queriedBases = report.queriedBases;
+            queriedRecords = report.recordsQueried;
+        } else {
+            const auto hits = filter.containsSequence(sequence);
+            queryKmers = hits.size();
+            positives = std::count(hits.begin(), hits.end(), uint8_t{1});
+            queriedBases = sequence.size();
+            queriedRecords = 1;
+        }
+
+        std::cout << "Inserted records: " << insertedRecords << "\n";
+        std::cout << "Queried records: " << queriedRecords << "\n";
+        std::cout << "\n";
+        std::cout << "Inserted bases: " << insertedBases << "\n";
+        std::cout << "Queried bases: " << queriedBases << "\n";
+        std::cout << "\n";
+        std::cout << "Inserted k-mers: " << inserted << "\n";
+        std::cout << "Query k-mers: " << queryKmers << "\n";
+        std::cout << "Positive k-mers: " << positives << "\n";
+        std::cout << "\n";
+        std::cout << "Load factor: " << filter.loadFactor() << "\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
     }
-
-    bloom::Filter<Config> filter(filterBits, chunkBases);
-    const uint64_t inserted = filter.insertSequence(sequence);
-    const auto hits = filter.containsSequence(query);
-    const uint64_t positives = std::count(hits.begin(), hits.end(), uint8_t{1});
-
-    std::cout << "Inserted k-mers: " << inserted << "\n";
-    std::cout << "Query k-mers: " << hits.size() << "\n";
-    std::cout << "Positive k-mers: " << positives << "\n";
-    std::cout << "Load factor: " << filter.loadFactor() << "\n";
-    std::cout << "Sequence length: " << sequence.size() << "\n";
-    return 0;
 }
