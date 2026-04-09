@@ -16,7 +16,7 @@
 
 #include <bloom/BloomFilter.cuh>
 
-using TestConfig = bloom::Config<5, 3, 4, 3>;
+using TestConfig = bloom::Config<5, 4, 3, 3>;
 
 class BloomFilterTest : public ::testing::Test {
    protected:

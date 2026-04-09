@@ -20,10 +20,9 @@ namespace bloom {
 
 template <
     uint16_t K_,
-    uint16_t M_,
     uint16_t S_,
+    uint16_t M_,
     uint64_t HashCount_,
-    uint64_t FilterBlockBits_ = 256,
     uint64_t CudaBlockSize_ = 256,
     typename WordType_ = uint64_t>
 struct Config {
@@ -33,7 +32,7 @@ struct Config {
     static constexpr uint16_t m = M_;
     static constexpr uint16_t s = S_;
     static constexpr uint64_t hashCount = HashCount_;
-    static constexpr uint64_t filterBlockBits = FilterBlockBits_;
+    static constexpr uint64_t filterBlockBits = 256;
     static constexpr uint64_t cudaBlockSize = CudaBlockSize_;
 
     static constexpr uint64_t wordBits = sizeof(WordType) * 8;

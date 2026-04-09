@@ -227,7 +227,7 @@ class SuperBloomConfigFixture : public SuperBloomFixtureBase<Config> {
 #define SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Fixture
 
 #define DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE(K, S, M, H)                              \
-    using SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) = bloom::Config<K, M, S, H, 256, 512>; \
+    using SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) = bloom::Config<K, S, M, H, 512>; \
     using SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) =                                     \
         SuperBloomConfigFixture<SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H)>;
 
