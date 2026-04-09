@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
 
 #include <bloom/BloomFilter.cuh>
+#include <bloom/PackedKmerBinary.hpp>
 
 std::string generateRandomDNA(uint64_t length, uint32_t seed) {
     static constexpr char bases[] = {'A', 'C', 'G', 'T'};
@@ -66,8 +68,9 @@ int main(int argc, char** argv) {
     std::string query;
     std::string sequenceFastxPath;
     std::string queryFastxPath;
+    std::string sequencePackedPath;
+    std::string queryPackedPath;
     uint64_t filterBits = 1ULL << 24;
-    uint64_t chunkBases = bloom::Filter<Config>::defaultChunkBases;
     uint64_t sequenceLength = 1ULL << 16;
     uint32_t seed = 42;
 
@@ -84,6 +87,12 @@ int main(int argc, char** argv) {
         app.add_option("--sequence-fastx", sequenceFastxPath, "FASTA/FASTQ file to insert");
     auto* queryFastxOption =
         app.add_option("--query-fastx", queryFastxPath, "FASTA/FASTQ file to query");
+    auto* sequencePackedOption = app.add_option(
+        "--sequence-packed-binary", sequencePackedPath, "Packed k-mer binary file to insert"
+    );
+    auto* queryPackedOption = app.add_option(
+        "--query-packed-binary", queryPackedPath, "Packed k-mer binary file to query"
+    );
     app.add_option("--length", sequenceLength, "Generate a random DNA sequence of this length")
         ->default_val(sequenceLength);
     app.add_option("--seed", seed, "Random seed for generated DNA")->default_val(seed);
@@ -91,24 +100,41 @@ int main(int argc, char** argv) {
            "--filter-bits", filterBits, "Total bloom-filter bits before power-of-two rounding"
     )
         ->default_val(filterBits);
-    app.add_option("--chunk-bases", chunkBases, "Host-to-GPU chunk size in bases")
-        ->default_val(chunkBases);
 
     sequenceFastxOption->excludes(sequenceOption);
+    sequencePackedOption->excludes(sequenceOption);
+    sequencePackedOption->excludes(sequenceFastxOption);
     queryFastxOption->excludes(queryOption);
+    queryPackedOption->excludes(queryOption);
+    queryPackedOption->excludes(queryFastxOption);
 
     CLI11_PARSE(app, argc, argv);
 
-    const bool useSequenceFastx = !sequenceFastxPath.empty();
-    const bool useRawSequence = !useSequenceFastx && !sequence.empty();
-    const bool useGeneratedFastx = !useSequenceFastx && !useRawSequence;
+    const bool useSequencePacked = !sequencePackedPath.empty();
+    const bool useSequenceFastx = !useSequencePacked && !sequenceFastxPath.empty();
+    const bool useRawSequence = !useSequencePacked && !useSequenceFastx && !sequence.empty();
+    const bool useGeneratedFastx = !useSequencePacked && !useSequenceFastx && !useRawSequence;
 
     if (useGeneratedFastx) {
         sequence = generateRandomDNA(sequenceLength, seed);
     }
 
     try {
-        bloom::Filter<Config> filter(filterBits, chunkBases);
+        bloom::Filter<Config> filter(filterBits);
+
+        auto loadPackedBinary = [](std::string_view path) {
+            const auto file = bloom::readPackedKmerBinaryFile(path);
+            if (file.k != Config::k) {
+                throw std::runtime_error(
+                    "Packed k-mer binary uses k=" + std::to_string(file.k) +
+                    ", but this example is compiled for k=" + std::to_string(Config::k)
+                );
+            }
+            return file;
+        };
+
+        std::optional<bloom::PackedKmerBinaryFile> sequencePackedFile;
+        std::optional<bloom::PackedKmerBinaryFile> queryPackedFile;
 
         uint64_t inserted = 0;
         uint64_t queryKmers = 0;
@@ -117,8 +143,19 @@ int main(int argc, char** argv) {
         uint64_t queriedBases = 0;
         uint64_t insertedRecords = 0;
         uint64_t queriedRecords = 0;
+        bool insertedBasesKnown = true;
+        bool queriedBasesKnown = true;
+        bool insertedRecordsKnown = true;
+        bool queriedRecordsKnown = true;
+        bool usedPackedInput = false;
 
-        if (useSequenceFastx) {
+        if (useSequencePacked) {
+            sequencePackedFile = loadPackedBinary(sequencePackedPath);
+            inserted = filter.insertPackedKmers(sequencePackedFile->kmers);
+            insertedBasesKnown = false;
+            insertedRecordsKnown = false;
+            usedPackedInput = true;
+        } else if (useSequenceFastx) {
             const auto report = filter.insertFastxFile(sequenceFastxPath);
             inserted = report.insertedKmers;
             insertedBases = report.indexedBases;
@@ -135,7 +172,15 @@ int main(int argc, char** argv) {
             insertedRecords = report.recordsIndexed;
         }
 
-        if (!queryFastxPath.empty()) {
+        if (!queryPackedPath.empty()) {
+            queryPackedFile = loadPackedBinary(queryPackedPath);
+            const auto hits = filter.containsPackedKmers(queryPackedFile->kmers);
+            queryKmers = hits.size();
+            positives = std::count(hits.begin(), hits.end(), uint8_t{1});
+            queriedBasesKnown = false;
+            queriedRecordsKnown = false;
+            usedPackedInput = true;
+        } else if (!queryFastxPath.empty()) {
             const auto report = filter.queryFastxFile(queryFastxPath);
             queryKmers = report.queriedKmers;
             positives = report.positiveKmers;
@@ -147,6 +192,14 @@ int main(int argc, char** argv) {
             positives = std::count(hits.begin(), hits.end(), uint8_t{1});
             queriedBases = query.size();
             queriedRecords = 1;
+        } else if (useSequencePacked) {
+            const auto& packedFile = sequencePackedFile.value();
+            const auto hits = filter.containsPackedKmers(packedFile.kmers);
+            queryKmers = hits.size();
+            positives = std::count(hits.begin(), hits.end(), uint8_t{1});
+            queriedBasesKnown = false;
+            queriedRecordsKnown = false;
+            usedPackedInput = true;
         } else if (useSequenceFastx) {
             const auto report = filter.queryFastxFile(sequenceFastxPath);
             queryKmers = report.queriedKmers;
@@ -168,15 +221,42 @@ int main(int argc, char** argv) {
             queriedRecords = 1;
         }
 
-        std::cout << "Inserted records: " << insertedRecords << "\n";
-        std::cout << "Queried records: " << queriedRecords << "\n";
+        std::cout << "Inserted records: ";
+        if (insertedRecordsKnown) {
+            std::cout << insertedRecords;
+        } else {
+            std::cout << "n/a (packed k-mer input)";
+        }
         std::cout << "\n";
-        std::cout << "Inserted bases: " << insertedBases << "\n";
-        std::cout << "Queried bases: " << queriedBases << "\n";
+        std::cout << "Queried records: ";
+        if (queriedRecordsKnown) {
+            std::cout << queriedRecords;
+        } else {
+            std::cout << "n/a (packed k-mer input)";
+        }
+        std::cout << "\n";
+        std::cout << "\n";
+        std::cout << "Inserted bases: ";
+        if (insertedBasesKnown) {
+            std::cout << insertedBases;
+        } else {
+            std::cout << "n/a (packed k-mer input)";
+        }
+        std::cout << "\n";
+        std::cout << "Queried bases: ";
+        if (queriedBasesKnown) {
+            std::cout << queriedBases;
+        } else {
+            std::cout << "n/a (packed k-mer input)";
+        }
+        std::cout << "\n";
         std::cout << "\n";
         std::cout << "Inserted k-mers: " << inserted << "\n";
         std::cout << "Query k-mers: " << queryKmers << "\n";
         std::cout << "Positive k-mers: " << positives << "\n";
+        if (usedPackedInput) {
+            std::cout << "Packed k-mer k: " << Config::k << "\n";
+        }
         std::cout << "\n";
         std::cout << "Load factor: " << filter.loadFactor() << "\n";
         return 0;

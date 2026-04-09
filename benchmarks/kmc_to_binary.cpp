@@ -1,13 +1,16 @@
 /*
   KMC database to binary converter for benchmarks.
 
-  Reads a KMC database directly using the KMC API and outputs our binary format:
+ Reads a KMC database directly using the KMC API and outputs our binary format:
+    - uint64_t: K-mer length (k)
     - uint64_t: Number of k-mers (N)
     - N x uint64_t: 2-bit encoded k-mers
 */
 
 #include <kmc_api/kmc_file.h>
 #include <CLI/CLI.hpp>
+
+#include <bloom/PackedKmerBinary.hpp>
 
 #include <cstdint>
 #include <fstream>
@@ -89,9 +92,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Write placeholder for count
-    uint64_t count = 0;
-    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    bloom::writePackedKmerBinaryHeader(out, kmerLength, 0);
 
     // Read and convert k-mers
     CKmerAPI kmerObj(kmerLength);
@@ -118,9 +119,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Seek back and write actual count
+    // Seek back and write the completed header.
     out.seekp(0);
-    out.write(reinterpret_cast<const char*>(&validCount), sizeof(validCount));
+    bloom::writePackedKmerBinaryHeader(out, kmerLength, validCount);
     out.close();
 
     kmcDb.Close();

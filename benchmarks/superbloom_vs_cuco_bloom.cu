@@ -13,9 +13,9 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include <bloom/BloomFilter.cuh>
-#include <bloom/hashutil.cuh>
 #include <bloom/helpers.cuh>
 #include <cuco/bloom_filter.cuh>
 
@@ -23,13 +23,25 @@
 
 namespace bm = benchmark;
 
-
-using SuperConfig = bloom::Config<31, 21, 27, 6, 256, 512>;
-using SuperS30Config = bloom::Config<31, 21, 30, 7, 256, 512>;
-using SuperS28Config = bloom::Config<31, 21, 28, 6, 256, 512>;
-using SuperS24Config = bloom::Config<31, 21, 24, 5, 256, 512>;
-using SuperNoFindereConfig = bloom::Config<31, 21, 31, 8, 256, 512>;
 using CucoBloom = cuco::bloom_filter<uint64_t>;
+
+// It's K - S - M - H
+
+#define SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(X) X(31, 27, 21, 3)
+
+#define SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR(X) SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(X)
+
+#define SUPERBLOOM_CONFIGS_FPR_ONLY(X) \
+    X(31, 31, 21, 3)                   \
+    X(31, 30, 21, 3)                   \
+    X(31, 28, 21, 3)                   \
+    X(31, 24, 21, 3)                   \
+    X(31, 20, 21, 3)                   \
+    X(31, 16, 21, 3)
+
+#define FOR_EACH_SUPERBLOOM_CONFIG(X)      \
+    SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR(X) \
+    SUPERBLOOM_CONFIGS_FPR_ONLY(X)
 
 constexpr uint64_t kBitsPerItem = 16;
 
@@ -60,8 +72,8 @@ bool packWindow(std::string_view sequence, uint64_t start, uint64_t& packed) {
 }
 
 template <uint64_t K>
-std::unordered_set<uint64_t> collectPackedKmers(std::string_view sequence) {
-    std::unordered_set<uint64_t> kmers;
+std::vector<uint64_t> collectPackedKmers(std::string_view sequence) {
+    std::vector<uint64_t> kmers;
     if (sequence.size() < K) {
         return kmers;
     }
@@ -70,10 +82,16 @@ std::unordered_set<uint64_t> collectPackedKmers(std::string_view sequence) {
     for (uint64_t index = 0; index + K <= sequence.size(); ++index) {
         uint64_t packed = 0;
         if (packWindow<K>(sequence, index, packed)) {
-            kmers.insert(packed);
+            kmers.push_back(packed);
         }
     }
     return kmers;
+}
+
+template <uint64_t K>
+std::unordered_set<uint64_t> collectPackedKmerSet(std::string_view sequence) {
+    const auto kmers = collectPackedKmers<K>(sequence);
+    return std::unordered_set<uint64_t>(kmers.begin(), kmers.end());
 }
 
 template <uint64_t K>
@@ -107,26 +125,31 @@ std::string generateZeroOverlapQuery(
     throw std::runtime_error("failed to generate zero-overlap query sequence");
 }
 
-struct BenchmarkSequences {
-    std::string throughputSequence;
-    std::string fprInsertSequence;
-    std::string zeroOverlapQuery;
+struct BenchmarkKmers {
+    std::vector<uint64_t> throughputPackedKmers;
+    std::vector<uint64_t> fprInsertPackedKmers;
+    std::vector<uint64_t> zeroOverlapPackedKmers;
 };
 
 template <uint64_t K>
-const BenchmarkSequences& getCachedSequences(uint64_t length) {
-    static std::unordered_map<uint64_t, BenchmarkSequences> cache;
+const BenchmarkKmers& getCachedKmers(uint64_t length) {
+    static std::unordered_map<uint64_t, BenchmarkKmers> cache;
 
     auto it = cache.find(length);
     if (it != cache.end()) {
         return it->second;
     }
 
-    BenchmarkSequences sequences;
-    sequences.throughputSequence = generateRandomDNA(length, 42);
-    sequences.fprInsertSequence = generateRandomDNA(length, 7);
-    const auto insertKmers = collectPackedKmers<K>(sequences.fprInsertSequence);
-    sequences.zeroOverlapQuery = generateZeroOverlapQuery<K>(length, 1337, insertKmers);
+    BenchmarkKmers sequences;
+    const auto throughputSequence = generateRandomDNA(length, 42);
+    sequences.throughputPackedKmers = collectPackedKmers<K>(throughputSequence);
+
+    const auto fprInsertSequence = generateRandomDNA(length, 7);
+    sequences.fprInsertPackedKmers = collectPackedKmers<K>(fprInsertSequence);
+
+    const auto insertKmers = collectPackedKmerSet<K>(fprInsertSequence);
+    const auto zeroOverlapQuery = generateZeroOverlapQuery<K>(length, 1337, insertKmers);
+    sequences.zeroOverlapPackedKmers = collectPackedKmers<K>(zeroOverlapQuery);
 
     return cache.emplace(length, std::move(sequences)).first->second;
 }
@@ -136,32 +159,15 @@ uint64_t cucoNumBlocks(uint64_t numItems) {
     return SDIV(numItems * kBitsPerItem, CucoBloom::words_per_block * bitsPerWord);
 }
 
-void setSequenceCounters(
+void setPackedKmerCounters(
     bm::State& state,
     uint64_t memoryBytes,
     uint64_t sequenceLength,
-    uint64_t numKmers,
-    uint64_t numSmers
+    uint64_t numKmers
 ) {
-    benchmark_common::setCommonCounters(state, memoryBytes, numSmers, sequenceLength);
+    benchmark_common::setCommonCounters(state, memoryBytes, numKmers, sequenceLength);
     state.counters["num_kmers"] = bm::Counter(static_cast<double>(numKmers));
-    state.counters["num_smers"] = bm::Counter(static_cast<double>(numSmers));
-}
-
-template <uint64_t WindowLength>
-__global__ void hashWindowsKernel(const char* sequence, uint64_t length, uint64_t* hashes) {
-    const uint64_t index = bloom::detail::globalThreadId();
-    if (index + WindowLength > length) {
-        return;
-    }
-
-    uint64_t packed = 0;
-    _Pragma("unroll")
-    for (uint64_t i = 0; i < WindowLength; ++i) {
-        packed = (packed << 2) |
-                 static_cast<uint64_t>(bloom::detail::encodeBase(sequence[index + i]));
-    }
-    hashes[index] = xxhash::xxhash64(packed);
+    state.counters["packed_input"] = bm::Counter(1.0);
 }
 
 template <typename Config>
@@ -169,28 +175,25 @@ class SuperBloomFixtureBase : public bm::Fixture {
    public:
     void setupCommon(const bm::State& state) {
         sequenceLength = static_cast<uint64_t>(state.range(0));
-        const auto& sequences = getCachedSequences<Config::k>(sequenceLength);
-        hostSequence = sequences.throughputSequence;
-        numKmers = sequenceLength - Config::k + 1;
+        cachedKmers = &getCachedKmers<Config::k>(sequenceLength);
+        numKmers = cachedKmers->throughputPackedKmers.size();
         numSmers = sequenceLength - Config::s + 1;
 
-        const uint64_t requestedFilterBits = bloom::detail::nextPowerOfTwo(numSmers * kBitsPerItem);
+        const uint64_t requestedFilterBits = bloom::detail::nextPowerOfTwo(numKmers * kBitsPerItem);
         filter = std::make_unique<bloom::Filter<Config>>(requestedFilterBits);
         filterMemory = filter->filterBits() / 8;
         d_output.resize(numKmers);
-
-        hostFprInsertSequence = sequences.fprInsertSequence;
-        hostZeroOverlapQuery = sequences.zeroOverlapQuery;
     }
 
     void tearDownCommon() {
         filter.reset();
+        cachedKmers = nullptr;
         d_output.clear();
         d_output.shrink_to_fit();
     }
 
-    void setCounters(bm::State& state) const {
-        setSequenceCounters(state, filterMemory, sequenceLength, numKmers, numSmers);
+    void setPackedCounters(bm::State& state) const {
+        setPackedKmerCounters(state, filterMemory, sequenceLength, numKmers);
         state.counters["s"] = bm::Counter(static_cast<double>(Config::s));
         state.counters["hashes"] = bm::Counter(static_cast<double>(Config::hashCount));
     }
@@ -199,83 +202,45 @@ class SuperBloomFixtureBase : public bm::Fixture {
     uint64_t numKmers{};
     uint64_t numSmers{};
     uint64_t filterMemory{};
-    std::string hostSequence;
-    std::string hostFprInsertSequence;
-    std::string hostZeroOverlapQuery;
+    const BenchmarkKmers* cachedKmers{};
     thrust::device_vector<uint8_t> d_output;
     std::unique_ptr<bloom::Filter<Config>> filter;
     benchmark_common::GPUTimer timer;
 };
 
-class SuperBloomFixture : public SuperBloomFixtureBase<SuperConfig> {
+template <typename Config>
+class SuperBloomConfigFixture : public SuperBloomFixtureBase<Config> {
     using bm::Fixture::SetUp;
     using bm::Fixture::TearDown;
 
    public:
     void SetUp(const bm::State& state) override {
-        setupCommon(state);
+        this->setupCommon(state);
     }
 
     void TearDown(const bm::State&) override {
-        tearDownCommon();
+        this->tearDownCommon();
     }
 };
 
-class SuperBloomNoFindereFixture : public SuperBloomFixtureBase<SuperNoFindereConfig> {
-    using bm::Fixture::SetUp;
-    using bm::Fixture::TearDown;
+#define SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Config
+#define SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Fixture
 
-   public:
-    void SetUp(const bm::State& state) override {
-        setupCommon(state);
-    }
+#define DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE(K, S, M, H)                              \
+    using SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) = bloom::Config<K, M, S, H, 256, 512>; \
+    using SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) =                                     \
+        SuperBloomConfigFixture<SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H)>;
 
-    void TearDown(const bm::State&) override {
-        tearDownCommon();
-    }
-};
+FOR_EACH_SUPERBLOOM_CONFIG(DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE)
 
-class SuperBloomS30Fixture : public SuperBloomFixtureBase<SuperS30Config> {
-    using bm::Fixture::SetUp;
-    using bm::Fixture::TearDown;
+#undef DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE
 
-   public:
-    void SetUp(const bm::State& state) override {
-        setupCommon(state);
-    }
+#define DEFINE_CUCO_REFERENCE_CONFIG(K, S, M, H) \
+    using CucoReferenceConfig = SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H);
 
-    void TearDown(const bm::State&) override {
-        tearDownCommon();
-    }
-};
+SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(DEFINE_CUCO_REFERENCE_CONFIG)
 
-class SuperBloomS28Fixture : public SuperBloomFixtureBase<SuperS28Config> {
-    using bm::Fixture::SetUp;
-    using bm::Fixture::TearDown;
-
-   public:
-    void SetUp(const bm::State& state) override {
-        setupCommon(state);
-    }
-
-    void TearDown(const bm::State&) override {
-        tearDownCommon();
-    }
-};
-
-class SuperBloomS24Fixture : public SuperBloomFixtureBase<SuperS24Config> {
-    using bm::Fixture::SetUp;
-    using bm::Fixture::TearDown;
-
-   public:
-    void SetUp(const bm::State& state) override {
-        setupCommon(state);
-    }
-
-    void TearDown(const bm::State&) override {
-        tearDownCommon();
-    }
-};
+#undef DEFINE_CUCO_REFERENCE_CONFIG
 
 class CucoBloomFixture : public bm::Fixture {
     using bm::Fixture::SetUp;
@@ -284,304 +249,259 @@ class CucoBloomFixture : public bm::Fixture {
    public:
     void SetUp(const bm::State& state) override {
         sequenceLength = static_cast<uint64_t>(state.range(0));
-        const auto& sequences = getCachedSequences<SuperConfig::k>(sequenceLength);
-        hostSequence = sequences.throughputSequence;
-        numKmers = sequenceLength - SuperConfig::k + 1;
-        numSmers = sequenceLength - SuperConfig::s + 1;
+        cachedKmers = &getCachedKmers<CucoReferenceConfig::k>(sequenceLength);
+        numKmers = cachedKmers->throughputPackedKmers.size();
 
-        d_sequence.resize(sequenceLength);
         d_kmerHashes.resize(numKmers);
         d_output.resize(numKmers);
 
         filter = std::make_unique<CucoBloom>(cucoNumBlocks(numKmers));
         filterMemory = filter->block_extent() * CucoBloom::words_per_block *
                        sizeof(typename CucoBloom::word_type);
-
-        hostFprInsertSequence = sequences.fprInsertSequence;
-        hostZeroOverlapQuery = sequences.zeroOverlapQuery;
     }
 
     void TearDown(const bm::State&) override {
         filter.reset();
-        d_sequence.clear();
+        cachedKmers = nullptr;
         d_kmerHashes.clear();
         d_output.clear();
-        d_sequence.shrink_to_fit();
         d_kmerHashes.shrink_to_fit();
         d_output.shrink_to_fit();
     }
 
-    void setCounters(bm::State& state) const {
-        setSequenceCounters(state, filterMemory, sequenceLength, numKmers, numSmers);
+    void setPackedCounters(bm::State& state) const {
+        setPackedKmerCounters(state, filterMemory, sequenceLength, numKmers);
     }
 
-    void stageSequence(const std::string& sequence, cudaStream_t stream = {}) {
+    void stagePackedKmers(const std::vector<uint64_t>& kmers, cudaStream_t stream = {}) {
         CUDA_CALL(cudaMemcpyAsync(
-            thrust::raw_pointer_cast(d_sequence.data()),
-            sequence.data(),
-            sequenceLength * sizeof(char),
+            thrust::raw_pointer_cast(d_kmerHashes.data()),
+            kmers.data(),
+            kmers.size() * sizeof(uint64_t),
             cudaMemcpyHostToDevice,
             stream
         ));
     }
 
-    void hashKmers(cudaStream_t stream = {}) {
-        const uint64_t blockSize = 256;
-        const uint64_t gridSize = SDIV(numKmers, blockSize);
-        hashWindowsKernel<SuperConfig::k><<<gridSize, blockSize, 0, stream>>>(
-            thrust::raw_pointer_cast(d_sequence.data()),
-            sequenceLength,
-            thrust::raw_pointer_cast(d_kmerHashes.data())
-        );
-        CUDA_CALL(cudaGetLastError());
-    }
-
     uint64_t sequenceLength{};
     uint64_t numKmers{};
-    uint64_t numSmers{};
     uint64_t filterMemory{};
-    std::string hostSequence;
-    std::string hostFprInsertSequence;
-    std::string hostZeroOverlapQuery;
-    thrust::device_vector<char> d_sequence;
+    const BenchmarkKmers* cachedKmers{};
     thrust::device_vector<uint64_t> d_kmerHashes;
     thrust::device_vector<uint8_t> d_output;
     std::unique_ptr<CucoBloom> filter;
     benchmark_common::GPUTimer timer;
 };
 
-BENCHMARK_DEFINE_F(SuperBloomFixture, Insert)(bm::State& state) {
+void setFprCounters(bm::State& state, uint64_t falsePositives, uint64_t numKmers) {
+    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
+    state.counters["fpr_percentage"] =
+        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
+}
+
+template <typename Fixture>
+void runSuperBloomInsertBenchmark(Fixture& fixture, bm::State& state) {
     for (auto _ : state) {
-        filter->clear();
+        fixture.filter->clear();
         CUDA_CALL(cudaDeviceSynchronize());
 
-        timer.start();
-        benchmark::DoNotOptimize(filter->insertSequence(hostSequence));
-        const double elapsed = timer.elapsed();
+        fixture.timer.start();
+        benchmark::DoNotOptimize(
+            fixture.filter->insertPackedKmers(fixture.cachedKmers->throughputPackedKmers)
+        );
+        const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
     }
-    setCounters(state);
+    fixture.setPackedCounters(state);
 }
 
-BENCHMARK_DEFINE_F(SuperBloomFixture, Query)(bm::State& state) {
-    filter->clear();
-    benchmark::DoNotOptimize(filter->insertSequence(hostSequence));
+template <typename Fixture>
+void runSuperBloomQueryBenchmark(Fixture& fixture, bm::State& state) {
+    fixture.filter->clear();
+    benchmark::DoNotOptimize(
+        fixture.filter->insertPackedKmers(fixture.cachedKmers->throughputPackedKmers)
+    );
     CUDA_CALL(cudaDeviceSynchronize());
 
     for (auto _ : state) {
-        timer.start();
-        filter->containsSequence(
-            hostSequence.data(), hostSequence.size(), thrust::raw_pointer_cast(d_output.data())
+        fixture.timer.start();
+        fixture.filter->containsPackedKmers(
+            fixture.cachedKmers->throughputPackedKmers.data(),
+            fixture.cachedKmers->throughputPackedKmers.size(),
+            thrust::raw_pointer_cast(fixture.d_output.data())
         );
-        const double elapsed = timer.elapsed();
+        const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
+        benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
     }
-    setCounters(state);
+    fixture.setPackedCounters(state);
 }
 
-BENCHMARK_DEFINE_F(SuperBloomFixture, FPR)(bm::State& state) {
-    filter->clear();
-    benchmark::DoNotOptimize(filter->insertSequence(hostFprInsertSequence));
-    CUDA_CALL(cudaDeviceSynchronize());
-
-    uint64_t falsePositives = 0;
-    for (auto _ : state) {
-        timer.start();
-        filter->containsSequence(
-            hostZeroOverlapQuery.data(),
-            hostZeroOverlapQuery.size(),
-            thrust::raw_pointer_cast(d_output.data())
-        );
-        const double elapsed = timer.elapsed();
-        state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
-    }
-
-    falsePositives = static_cast<uint64_t>(thrust::count(d_output.begin(), d_output.end(), uint8_t{1}));
-    setCounters(state);
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
-}
-
-BENCHMARK_DEFINE_F(SuperBloomNoFindereFixture, FPR)(bm::State& state) {
-    filter->clear();
-    benchmark::DoNotOptimize(filter->insertSequence(hostFprInsertSequence));
+template <typename Fixture>
+void runSuperBloomFprBenchmark(Fixture& fixture, bm::State& state) {
+    fixture.filter->clear();
+    benchmark::DoNotOptimize(
+        fixture.filter->insertPackedKmers(fixture.cachedKmers->fprInsertPackedKmers)
+    );
     CUDA_CALL(cudaDeviceSynchronize());
 
     uint64_t falsePositives = 0;
     for (auto _ : state) {
-        timer.start();
-        filter->containsSequence(
-            hostZeroOverlapQuery.data(),
-            hostZeroOverlapQuery.size(),
-            thrust::raw_pointer_cast(d_output.data())
+        fixture.timer.start();
+        fixture.filter->containsPackedKmers(
+            fixture.cachedKmers->zeroOverlapPackedKmers.data(),
+            fixture.cachedKmers->zeroOverlapPackedKmers.size(),
+            thrust::raw_pointer_cast(fixture.d_output.data())
         );
-        const double elapsed = timer.elapsed();
+        const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
+        benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
     }
 
-    falsePositives = static_cast<uint64_t>(thrust::count(d_output.begin(), d_output.end(), uint8_t{1}));
-    setCounters(state);
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
+    falsePositives = static_cast<uint64_t>(
+        thrust::count(fixture.d_output.begin(), fixture.d_output.end(), uint8_t{1})
+    );
+    fixture.setPackedCounters(state);
+    setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
-BENCHMARK_DEFINE_F(SuperBloomS30Fixture, FPR)(bm::State& state) {
-    filter->clear();
-    benchmark::DoNotOptimize(filter->insertSequence(hostFprInsertSequence));
+void stageAndAddCuco(CucoBloomFixture& fixture, const std::vector<uint64_t>& kmers) {
+    fixture.stagePackedKmers(kmers);
+    fixture.filter->add(fixture.d_kmerHashes.begin(), fixture.d_kmerHashes.end());
+}
+
+void runCucoInsertBenchmark(CucoBloomFixture& fixture, bm::State& state) {
+    for (auto _ : state) {
+        fixture.filter->clear();
+        CUDA_CALL(cudaDeviceSynchronize());
+
+        fixture.timer.start();
+        stageAndAddCuco(fixture, fixture.cachedKmers->throughputPackedKmers);
+        const double elapsed = fixture.timer.elapsed();
+        state.SetIterationTime(elapsed);
+    }
+    fixture.setPackedCounters(state);
+}
+
+void runCucoQueryBenchmark(CucoBloomFixture& fixture, bm::State& state) {
+    fixture.filter->clear();
+    stageAndAddCuco(fixture, fixture.cachedKmers->throughputPackedKmers);
+    CUDA_CALL(cudaDeviceSynchronize());
+
+    for (auto _ : state) {
+        fixture.timer.start();
+        fixture.stagePackedKmers(fixture.cachedKmers->throughputPackedKmers);
+        fixture.filter->contains(
+            fixture.d_kmerHashes.begin(),
+            fixture.d_kmerHashes.end(),
+            reinterpret_cast<bool*>(thrust::raw_pointer_cast(fixture.d_output.data()))
+        );
+        const double elapsed = fixture.timer.elapsed();
+        state.SetIterationTime(elapsed);
+        benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
+    }
+    fixture.setPackedCounters(state);
+}
+
+void runCucoFprBenchmark(CucoBloomFixture& fixture, bm::State& state) {
+    fixture.filter->clear();
+    stageAndAddCuco(fixture, fixture.cachedKmers->fprInsertPackedKmers);
     CUDA_CALL(cudaDeviceSynchronize());
 
     uint64_t falsePositives = 0;
     for (auto _ : state) {
-        timer.start();
-        filter->containsSequence(
-            hostZeroOverlapQuery.data(),
-            hostZeroOverlapQuery.size(),
-            thrust::raw_pointer_cast(d_output.data())
+        fixture.timer.start();
+        fixture.stagePackedKmers(fixture.cachedKmers->zeroOverlapPackedKmers);
+        fixture.filter->contains(
+            fixture.d_kmerHashes.begin(),
+            fixture.d_kmerHashes.end(),
+            reinterpret_cast<bool*>(thrust::raw_pointer_cast(fixture.d_output.data()))
         );
-        const double elapsed = timer.elapsed();
+        const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
+        benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
     }
 
-    falsePositives = static_cast<uint64_t>(thrust::count(d_output.begin(), d_output.end(), uint8_t{1}));
-    setCounters(state);
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
-}
-
-BENCHMARK_DEFINE_F(SuperBloomS28Fixture, FPR)(bm::State& state) {
-    filter->clear();
-    benchmark::DoNotOptimize(filter->insertSequence(hostFprInsertSequence));
-    CUDA_CALL(cudaDeviceSynchronize());
-
-    uint64_t falsePositives = 0;
-    for (auto _ : state) {
-        timer.start();
-        filter->containsSequence(
-            hostZeroOverlapQuery.data(),
-            hostZeroOverlapQuery.size(),
-            thrust::raw_pointer_cast(d_output.data())
-        );
-        const double elapsed = timer.elapsed();
-        state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
-    }
-
-    falsePositives = static_cast<uint64_t>(thrust::count(d_output.begin(), d_output.end(), uint8_t{1}));
-    setCounters(state);
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
-}
-
-BENCHMARK_DEFINE_F(SuperBloomS24Fixture, FPR)(bm::State& state) {
-    filter->clear();
-    benchmark::DoNotOptimize(filter->insertSequence(hostFprInsertSequence));
-    CUDA_CALL(cudaDeviceSynchronize());
-
-    uint64_t falsePositives = 0;
-    for (auto _ : state) {
-        timer.start();
-        filter->containsSequence(
-            hostZeroOverlapQuery.data(),
-            hostZeroOverlapQuery.size(),
-            thrust::raw_pointer_cast(d_output.data())
-        );
-        const double elapsed = timer.elapsed();
-        state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
-    }
-
-    falsePositives = static_cast<uint64_t>(thrust::count(d_output.begin(), d_output.end(), uint8_t{1}));
-    setCounters(state);
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
+    falsePositives = static_cast<uint64_t>(
+        thrust::count(fixture.d_output.begin(), fixture.d_output.end(), uint8_t{1})
+    );
+    fixture.setPackedCounters(state);
+    setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
 BENCHMARK_DEFINE_F(CucoBloomFixture, Insert)(bm::State& state) {
-    for (auto _ : state) {
-        filter->clear();
-        CUDA_CALL(cudaDeviceSynchronize());
-
-        timer.start();
-        stageSequence(hostSequence);
-        hashKmers();
-        filter->add(d_kmerHashes.begin(), d_kmerHashes.end());
-        const double elapsed = timer.elapsed();
-        state.SetIterationTime(elapsed);
-    }
-    setCounters(state);
+    runCucoInsertBenchmark(*this, state);
 }
 
 BENCHMARK_DEFINE_F(CucoBloomFixture, Query)(bm::State& state) {
-    filter->clear();
-    stageSequence(hostSequence);
-    hashKmers();
-    filter->add(d_kmerHashes.begin(), d_kmerHashes.end());
-    CUDA_CALL(cudaDeviceSynchronize());
-
-    for (auto _ : state) {
-        timer.start();
-        stageSequence(hostSequence);
-        hashKmers();
-        filter->contains(
-            d_kmerHashes.begin(),
-            d_kmerHashes.end(),
-            reinterpret_cast<bool*>(thrust::raw_pointer_cast(d_output.data()))
-        );
-        const double elapsed = timer.elapsed();
-        state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
-    }
-    setCounters(state);
+    runCucoQueryBenchmark(*this, state);
 }
 
 BENCHMARK_DEFINE_F(CucoBloomFixture, FPR)(bm::State& state) {
-    filter->clear();
-    stageSequence(hostFprInsertSequence);
-    hashKmers();
-    filter->add(d_kmerHashes.begin(), d_kmerHashes.end());
-    CUDA_CALL(cudaDeviceSynchronize());
-
-    uint64_t falsePositives = 0;
-    for (auto _ : state) {
-        timer.start();
-        stageSequence(hostZeroOverlapQuery);
-        hashKmers();
-        filter->contains(
-            d_kmerHashes.begin(),
-            d_kmerHashes.end(),
-            reinterpret_cast<bool*>(thrust::raw_pointer_cast(d_output.data()))
-        );
-        const double elapsed = timer.elapsed();
-        state.SetIterationTime(elapsed);
-        benchmark::DoNotOptimize(thrust::raw_pointer_cast(d_output.data()));
-    }
-
-    falsePositives = static_cast<uint64_t>(thrust::count(d_output.begin(), d_output.end(), uint8_t{1}));
-    setCounters(state);
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
+    runCucoFprBenchmark(*this, state);
 }
 
-REGISTER_BENCHMARK(SuperBloomFixture, Insert);
-REGISTER_BENCHMARK(SuperBloomFixture, Query);
-REGISTER_BENCHMARK(SuperBloomFixture, FPR);
-REGISTER_BENCHMARK(SuperBloomNoFindereFixture, FPR);
-REGISTER_BENCHMARK(SuperBloomS30Fixture, FPR);
-REGISTER_BENCHMARK(SuperBloomS28Fixture, FPR);
-REGISTER_BENCHMARK(SuperBloomS24Fixture, FPR);
+#define DEFINE_SUPERBLOOM_BENCHMARK_SET_INSERT_QUERY_FPR(FixtureName) \
+    BENCHMARK_DEFINE_F(FixtureName, Insert)(bm::State & state) {      \
+        runSuperBloomInsertBenchmark(*this, state);                   \
+    }                                                                 \
+    BENCHMARK_DEFINE_F(FixtureName, Query)(bm::State & state) {       \
+        runSuperBloomQueryBenchmark(*this, state);                    \
+    }                                                                 \
+    BENCHMARK_DEFINE_F(FixtureName, FPR)(bm::State & state) {         \
+        runSuperBloomFprBenchmark(*this, state);                      \
+    }
+
+#define DEFINE_SUPERBLOOM_BENCHMARK_SET_FPR_ONLY(FixtureName) \
+    BENCHMARK_DEFINE_F(FixtureName, FPR)(bm::State & state) { \
+        runSuperBloomFprBenchmark(*this, state);              \
+    }
+
+#define DEFINE_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS(K, S, M, H) \
+    DEFINE_SUPERBLOOM_BENCHMARK_SET_INSERT_QUERY_FPR(SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H))
+
+#define DEFINE_SUPERBLOOM_FPR_ONLY_BENCHMARKS(K, S, M, H) \
+    DEFINE_SUPERBLOOM_BENCHMARK_SET_FPR_ONLY(SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H))
+
+SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR(DEFINE_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS)
+SUPERBLOOM_CONFIGS_FPR_ONLY(DEFINE_SUPERBLOOM_FPR_ONLY_BENCHMARKS)
+
+#undef DEFINE_SUPERBLOOM_FPR_ONLY_BENCHMARKS
+#undef DEFINE_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS
+#undef DEFINE_SUPERBLOOM_BENCHMARK_SET_FPR_ONLY
+#undef DEFINE_SUPERBLOOM_BENCHMARK_SET_INSERT_QUERY_FPR
+
+#define REGISTER_SUPERBLOOM_BENCHMARK_SET_INSERT_QUERY_FPR(FixtureName) \
+    REGISTER_BENCHMARK(FixtureName, Insert);                            \
+    REGISTER_BENCHMARK(FixtureName, Query);                             \
+    REGISTER_BENCHMARK(FixtureName, FPR);
+
+#define REGISTER_SUPERBLOOM_BENCHMARK_SET_FPR_ONLY(FixtureName) \
+    REGISTER_BENCHMARK(FixtureName, FPR);
+
+#define REGISTER_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS(K, S, M, H) \
+    REGISTER_SUPERBLOOM_BENCHMARK_SET_INSERT_QUERY_FPR(SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H))
+
+#define REGISTER_SUPERBLOOM_FPR_ONLY_BENCHMARKS(K, S, M, H) \
+    REGISTER_SUPERBLOOM_BENCHMARK_SET_FPR_ONLY(SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H))
+
+SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR(REGISTER_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS)
+SUPERBLOOM_CONFIGS_FPR_ONLY(REGISTER_SUPERBLOOM_FPR_ONLY_BENCHMARKS)
+
+#undef REGISTER_SUPERBLOOM_FPR_ONLY_BENCHMARKS
+#undef REGISTER_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS
+#undef REGISTER_SUPERBLOOM_BENCHMARK_SET_FPR_ONLY
+#undef REGISTER_SUPERBLOOM_BENCHMARK_SET_INSERT_QUERY_FPR
+
 REGISTER_BENCHMARK(CucoBloomFixture, Insert);
 REGISTER_BENCHMARK(CucoBloomFixture, Query);
 REGISTER_BENCHMARK(CucoBloomFixture, FPR);
 
+#undef FOR_EACH_SUPERBLOOM_CONFIG
+#undef SUPERBLOOM_CONFIGS_FPR_ONLY
+#undef SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR
+#undef SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG
+#undef SUPERBLOOM_FIXTURE_SYMBOL
+#undef SUPERBLOOM_CONFIG_SYMBOL
 
 STANDARD_BENCHMARK_MAIN();

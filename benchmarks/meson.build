@@ -43,6 +43,6 @@ kmc_api_dep = subproject('kmc').get_variable('kmc_api_dep')
 executable(
     'kmc_to_binary',
     'kmc_to_binary.cpp',
-    dependencies: [kmc_api_dep, cli11_dep],
+    dependencies: [bloom_dep, kmc_api_dep, cli11_dep],
     install: true,
 )

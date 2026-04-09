@@ -1,61 +1,16 @@
+#include <unistd.h>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
 #include "test_support.hpp"
 
-namespace {
-
-struct TempFile {
-    std::string path;
-
-    explicit TempFile(std::string pathValue) : path(std::move(pathValue)) {}
-
-    TempFile(const TempFile&) = delete;
-    TempFile& operator=(const TempFile&) = delete;
-
-    TempFile(TempFile&& other) noexcept : path(std::move(other.path)) {
-        other.path.clear();
-    }
-
-    ~TempFile() {
-        if (!path.empty()) {
-            std::remove(path.c_str());
-        }
-    }
-};
-
-TempFile writeTempFile(std::string_view contents) {
-    std::string pathTemplate = "/tmp/bloom-fastx-XXXXXX";
-    std::vector<char> pathBuffer(pathTemplate.begin(), pathTemplate.end());
-    pathBuffer.push_back('\0');
-
-    const int fd = mkstemp(pathBuffer.data());
-    if (fd == -1) {
-        throw std::runtime_error("Failed to create temporary FASTX file");
-    }
-    close(fd);
-
-    std::ofstream output(pathBuffer.data(), std::ios::binary);
-    if (!output.is_open()) {
-        std::remove(pathBuffer.data());
-        throw std::runtime_error("Failed to open temporary FASTX file for writing");
-    }
-    output << contents;
-    output.close();
-
-    return TempFile{pathBuffer.data()};
-}
-
-}  // namespace
-
 TEST_F(BloomFilterTest, InsertFastxFileParsesWrappedFastaRecords) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGT";
     const auto file = writeTempFile(
@@ -75,7 +30,7 @@ TEST_F(BloomFilterTest, InsertFastxFileParsesWrappedFastaRecords) {
 }
 
 TEST_F(BloomFilterTest, QueryFastxFileParsesWrappedFastqWithCrLf) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGT";
     (void)filter.insertSequence(sequence);
@@ -98,7 +53,7 @@ TEST_F(BloomFilterTest, QueryFastxFileParsesWrappedFastqWithCrLf) {
 }
 
 TEST_F(BloomFilterTest, QueryFastxFileDoesNotCreateCrossRecordKmers) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequenceA = "ACGTACGT";
     const std::string sequenceB = "TGCATGCA";
@@ -126,7 +81,7 @@ TEST_F(BloomFilterTest, QueryFastxFileDoesNotCreateCrossRecordKmers) {
 }
 
 TEST_F(BloomFilterTest, MalformedFastqThrowsOnQualityLengthMismatch) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const auto file = writeTempFile(
         "@broken\n"

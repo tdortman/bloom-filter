@@ -3,7 +3,7 @@
 #include "test_support.hpp"
 
 TEST_F(BloomFilterTest, InsertAndQuerySameSequenceHasNoFalseNegatives) {
-    bloom::Filter<TestConfig> filter(1 << 12, 9);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGTACGT";
     const uint64_t inserted = filter.insertSequence(sequence);
@@ -15,7 +15,7 @@ TEST_F(BloomFilterTest, InsertAndQuerySameSequenceHasNoFalseNegatives) {
 }
 
 TEST_F(BloomFilterTest, InvalidBasesResetForwardWindows) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTNACGTACGTA";
     const auto inserted = filter.insertSequence(sequence);
@@ -26,25 +26,8 @@ TEST_F(BloomFilterTest, InvalidBasesResetForwardWindows) {
     EXPECT_EQ(hits, expected);
 }
 
-TEST_F(BloomFilterTest, ChunkedInsertMatchesLargeChunkQueryResults) {
-    const std::string sequence = "ACGTACGTACGTACGTACGTACGTACGTACGT";
-    const std::string query = "TACGTACGTACGTACGTACGTACGTACGTACG";
-
-    bloom::Filter<TestConfig> smallChunkFilter(1 << 13, 7);
-    bloom::Filter<TestConfig> largeChunkFilter(1 << 13, sequence.size());
-
-    const auto smallInserted = smallChunkFilter.insertSequence(sequence);
-    const auto largeInserted = largeChunkFilter.insertSequence(sequence);
-
-    const auto smallHits = smallChunkFilter.containsSequence(query);
-    const auto largeHits = largeChunkFilter.containsSequence(query);
-
-    EXPECT_EQ(smallInserted, largeInserted);
-    EXPECT_EQ(smallHits, largeHits);
-}
-
 TEST_F(BloomFilterTest, RepeatedInsertionIsIdempotent) {
-    bloom::Filter<TestConfig> filter(1 << 12, 9);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGTACGT";
     const auto firstInserted = filter.insertSequence(sequence);
@@ -58,7 +41,7 @@ TEST_F(BloomFilterTest, RepeatedInsertionIsIdempotent) {
 }
 
 TEST_F(BloomFilterTest, ShortSequenceInsertAndQueryReturnEmpty) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string shortSequence = "ACGT";
     const uint64_t inserted = filter.insertSequence(shortSequence);
@@ -69,7 +52,7 @@ TEST_F(BloomFilterTest, ShortSequenceInsertAndQueryReturnEmpty) {
 }
 
 TEST_F(BloomFilterTest, ShortSequenceDeviceOutputBufferRemainsUnchanged) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string shortSequence = "ACGT";
     uint8_t* d_output = nullptr;
@@ -90,7 +73,7 @@ TEST_F(BloomFilterTest, ShortSequenceDeviceOutputBufferRemainsUnchanged) {
 }
 
 TEST_F(BloomFilterTest, ClearResetsMembership) {
-    bloom::Filter<TestConfig> filter(1 << 12, 9);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGTACGT";
     (void)filter.insertSequence(sequence);
@@ -101,7 +84,7 @@ TEST_F(BloomFilterTest, ClearResetsMembership) {
 }
 
 TEST_F(BloomFilterTest, DeviceOutputMatchesHostContainsResults) {
-    bloom::Filter<TestConfig> filter(1 << 13, 8);
+    bloom::Filter<TestConfig> filter(1 << 13);
 
     const std::string insertedSequence = "ACGTACGTACGTACGTACGTACGT";
     const std::string querySequence = "TACGTACGTACGTACGTACGTACG";
@@ -128,7 +111,7 @@ TEST_F(BloomFilterTest, DeviceOutputMatchesHostContainsResults) {
 }
 
 TEST_F(BloomFilterTest, MultipleInsertionsRemainQueryable) {
-    bloom::Filter<TestConfig> filter(1 << 14, 9);
+    bloom::Filter<TestConfig> filter(1 << 14);
 
     const std::string sequenceA = "ACGTACGTACGTACGT";
     const std::string sequenceB = "TGCATGCATGCATGCA";
@@ -144,7 +127,7 @@ TEST_F(BloomFilterTest, MultipleInsertionsRemainQueryable) {
 }
 
 TEST_F(BloomFilterTest, LowercaseInsertionMatchesUppercaseQuery) {
-    bloom::Filter<TestConfig> filter(1 << 12, 8);
+    bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string lowerSequence = "acgtacgtacgtacgt";
     const std::string upperSequence = "ACGTACGTACGTACGT";
@@ -156,19 +139,4 @@ TEST_F(BloomFilterTest, LowercaseInsertionMatchesUppercaseQuery) {
 
     EXPECT_TRUE(allOnes(upperHits));
     EXPECT_TRUE(allOnes(lowerHits));
-}
-
-TEST_F(BloomFilterTest, ChunkingWithInvalidBasesMatchesAcrossChunkSizes) {
-    const std::string sequence = "ACGTNACGTACGTNACGTACGTNACGTACGT";
-
-    bloom::Filter<TestConfig> smallChunkFilter(1 << 13, 5);
-    bloom::Filter<TestConfig> largeChunkFilter(1 << 13, sequence.size());
-
-    (void)smallChunkFilter.insertSequence(sequence);
-    (void)largeChunkFilter.insertSequence(sequence);
-
-    const auto smallHits = smallChunkFilter.containsSequence(sequence);
-    const auto largeHits = largeChunkFilter.containsSequence(sequence);
-
-    EXPECT_EQ(smallHits, largeHits);
 }
