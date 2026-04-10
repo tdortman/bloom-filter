@@ -77,7 +77,10 @@ def main(
         if parsed is None:
             continue
         filter_key, operation, size = parsed
-        base_name = f"{filter_key}_{operation}"
+        # Fixture names may embed tuning params (e.g. superbloom_k31_...);
+        # normalize to the canonical filter family for styling/grouping.
+        filter_key = filter_key.split("_", 1)[0]
+        benchmark_key = (filter_key, operation)
 
         # Only process median records
         if "_median" not in name:
@@ -90,7 +93,7 @@ def main(
             items_per_second = row.get("items_per_second")
             if pd.notna(items_per_second):
                 throughput_beps = pu.to_billion_elems_per_sec(items_per_second)
-                throughput_data[base_name][size] = throughput_beps
+                throughput_data[benchmark_key][size] = throughput_beps
 
             memory_bytes = row.get("memory_bytes")
             if pd.notna(memory_bytes):
@@ -112,24 +115,21 @@ def main(
     fig, ax_throughput = plt.subplots(figsize=(12, 7))
     ax_throughput.set_facecolor("white")
 
-    def get_last_throughput(bench_name):
-        sizes = sorted(throughput_data[bench_name].keys())
+    def get_last_throughput(bench_key):
+        sizes = sorted(throughput_data[bench_key].keys())
         if sizes:
-            return throughput_data[bench_name][sizes[-1]]
+            return throughput_data[bench_key][sizes[-1]]
         return 0
 
-    benchmark_names = sorted(
+    benchmark_keys = sorted(
         throughput_data.keys(), key=get_last_throughput, reverse=True
     )
 
     filter_handles: dict[str, Line2D] = {}
     seen_operations = set()
 
-    for bench_name in benchmark_names:
-        if "_" in bench_name:
-            filter_key, operation = bench_name.split("_", 1)
-        else:
-            filter_key, operation = bench_name, ""
+    for bench_key in benchmark_keys:
+        filter_key, operation = bench_key
 
         style = pu.get_filter_style(filter_key)
         color = style["color"]
@@ -137,11 +137,11 @@ def main(
         filter_label = pu.get_filter_display_name(filter_key)
         seen_operations.add(operation)
 
-        throughput_sizes = sorted(throughput_data[bench_name].keys())
+        throughput_sizes = sorted(throughput_data[bench_key].keys())
         throughput_points = [
-            (size, throughput_data[bench_name][size])
+            (size, throughput_data[bench_key][size])
             for size in throughput_sizes
-            if throughput_data[bench_name][size] > 0
+            if throughput_data[bench_key][size] > 0
         ]
         throughput_values = [value for _, value in throughput_points]
         throughput_sizes = [size for size, _ in throughput_points]
