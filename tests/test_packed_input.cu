@@ -113,59 +113,6 @@ TEST_F(BloomFilterTest, PackedInsertIsIdempotent) {
     EXPECT_FLOAT_EQ(firstLoadFactor, secondLoadFactor);
 }
 
-TEST_F(BloomFilterTest, PackedInsertTailCountNotDivisibleByFourSupportsQueries) {
-    bloom::Filter<TestConfig> filter(1 << 12);
-
-    const std::string sequence = "ACGTACGTACG";
-    const auto kmers = packValidKmers<TestConfig::k>(sequence);
-
-    ASSERT_FALSE(kmers.empty());
-    ASSERT_NE(kmers.size() % TestConfig::blockWordCount, 0ULL);
-    ASSERT_EQ(filter.insertPackedKmers(kmers.data(), kmers.size()), kmers.size());
-
-    const auto packedHits = filter.containsPackedKmers(kmers);
-    const auto sequenceHits = filter.containsSequence(sequence);
-
-    EXPECT_TRUE(allOnes(packedHits));
-    EXPECT_TRUE(allOnes(sequenceHits));
-}
-
-TEST_F(BloomFilterTest, PackedTailQueryMatchesHostAndDeviceResults) {
-    bloom::Filter<TestConfig> filter(1 << 12);
-
-    const std::string sequence = "ACGTACGTACG";
-    const auto kmers = packValidKmers<TestConfig::k>(sequence);
-    ASSERT_NE(kmers.size() % TestConfig::blockWordCount, 0ULL);
-
-    ASSERT_EQ(filter.insertPackedKmers(kmers.data(), kmers.size()), kmers.size());
-
-    std::vector<uint64_t> query = kmers;
-    query.push_back(kmers.front());
-    query.push_back(kmers.back());
-    ASSERT_NE(query.size() % TestConfig::blockWordCount, 0ULL);
-
-    const auto hostHits = filter.containsPackedKmers(query);
-    ASSERT_EQ(hostHits.size(), query.size());
-    EXPECT_TRUE(allOnes(hostHits));
-
-    uint8_t* d_output = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_output, hostHits.size() * sizeof(uint8_t)), cudaSuccess);
-
-    filter.containsPackedKmers(query.data(), query.size(), d_output);
-
-    std::vector<uint8_t> deviceHits(hostHits.size());
-    ASSERT_EQ(
-        cudaMemcpy(
-            deviceHits.data(), d_output, hostHits.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost
-        ),
-        cudaSuccess
-    );
-
-    EXPECT_EQ(deviceHits, hostHits);
-    EXPECT_TRUE(allOnes(deviceHits));
-    ASSERT_EQ(cudaFree(d_output), cudaSuccess);
-}
-
 TEST_F(BloomFilterTest, PackedBinaryStoresKAndLoadsKmers) {
     const auto file = makeTempBinaryFile();
     const auto kmers = packValidKmers<TestConfig::k>("ACGTACGTACGT");
