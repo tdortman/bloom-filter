@@ -781,7 +781,6 @@ class Filter {
         uint8_t* d_output,
         cudaStream_t stream
     ) const {
-        CUDA_CALL(cudaMemsetAsync(d_output, 0, count * sizeof(uint8_t), stream));
         const uint64_t gridSize = SDIV(count, Config::cudaBlockSize);
 
         detail::containsPackedKmersKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
@@ -820,11 +819,10 @@ struct PackedKmerInput {
 template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t packedKmerMinimizerHash(uint64_t packedKmer) {
     uint64_t minimizerHash = kInvalidHash;
-    _Pragma("unroll 1")
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t packedMmer =
             extractPackedSubwindow<Config::m, Config::k>(packedKmer, offset);
-        minimizerHash = min(minimizerHash, xxhash::xxhash64(packedMmer));
+        minimizerHash = min(minimizerHash, xxhash::hash64(packedMmer));
     }
     return minimizerHash;
 }
@@ -833,7 +831,7 @@ template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
     const uint64_t packedSmer = extractPackedSubwindow<Config::s, Config::k>(packedKmer, start);
-    return xxhash::xxhash64(packedSmer);
+    return xxhash::hash64(packedSmer);
 }
 
 template <typename Config>
@@ -844,17 +842,15 @@ template <typename Config>
     typename Filter<Config>::WordType word2,
     typename Filter<Config>::WordType word3
 ) {
-    bool present = true;
-    _Pragma("unroll 1")
+    typename Config::WordType req0 = 0, req1 = 0, req2 = 0, req3 = 0;
     for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
-        if (!Filter<Config>::Shard::containsHashInRegisters4(
-                word0, word1, word2, word3, packedKmerSmerHash<Config>(packedKmer, smerOffset)
-            )) {
-            present = false;
-            break;
-        }
+        Filter<Config>::Shard::hashToWordMasks4(
+            packedKmerSmerHash<Config>(packedKmer, smerOffset),
+            req0, req1, req2, req3
+        );
     }
-    return present;
+    return (word0 & req0) == req0 && (word1 & req1) == req1 &&
+           (word2 & req2) == req2 && (word3 & req3) == req3;
 }
 
 template <typename Config>
@@ -865,7 +861,6 @@ __device__ __forceinline__ void packedKmerWordMasks4(
     typename Config::WordType& wordMask2,
     typename Config::WordType& wordMask3
 ) {
-    _Pragma("unroll 1")
     for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
         Filter<Config>::Shard::hashToWordMasks4(
             packedKmerSmerHash<Config>(packedKmer, smerOffset),
@@ -921,13 +916,13 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
     for (uint64_t idx = threadIdx.x; idx < blockMmers; idx += Config::cudaBlockSize) {
         if (blockAllValid) {
             const uint64_t packedMmer = packEncodedWindowUnchecked<Config::m>(sequenceTile, idx);
-            mmerHashes[idx] = xxhash::xxhash64(packedMmer);
+            mmerHashes[idx] = xxhash::hash64(packedMmer);
         } else {
             uint64_t packedMmer = 0;
             if (!encodeWindow<Config::m>(sequenceTile, idx, packedMmer)) {
                 mmerHashes[idx] = kInvalidHash;
             } else {
-                mmerHashes[idx] = xxhash::xxhash64(packedMmer);
+                mmerHashes[idx] = xxhash::hash64(packedMmer);
             }
         }
     }
@@ -937,13 +932,13 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
     for (uint64_t idx = threadIdx.x; idx < blockSmers; idx += Config::cudaBlockSize) {
         if (blockAllValid) {
             const uint64_t packedSmer = packEncodedWindowUnchecked<Config::s>(sequenceTile, idx);
-            smerHashes[idx] = xxhash::xxhash64(packedSmer);
+            smerHashes[idx] = xxhash::hash64(packedSmer);
         } else {
             uint64_t packedSmer = 0;
             if (!encodeWindow<Config::s>(sequenceTile, idx, packedSmer)) {
                 smerHashes[idx] = kInvalidHash;
             } else {
-                smerHashes[idx] = xxhash::xxhash64(packedSmer);
+                smerHashes[idx] = xxhash::hash64(packedSmer);
             }
         }
     }

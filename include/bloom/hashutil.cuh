@@ -162,4 +162,16 @@ __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
     return finalize(h64);
 }
 
+/**
+ * See https://zimbry.blogspot.com/2011/09/better-bit-mixing-improving-on.html
+ */
+__host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
+    key ^= key >> 30;
+    key *= 0xbf58476d1ce4e5b9ULL;
+    key ^= key >> 27;
+    key *= 0x94d049bb133111ebULL;
+    key ^= key >> 31;
+    return key;
+}
+
 }  // namespace xxhash
