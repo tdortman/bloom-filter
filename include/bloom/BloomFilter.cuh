@@ -40,7 +40,7 @@ struct Config {
     static constexpr uint64_t minimizerSpan = k - m + 1;
     static constexpr uint64_t findereSpan = k - s + 1;
     static constexpr uint64_t insertGroupSize = blockWordCount;
-    static constexpr uint64_t queryGroupSize = filterBlockBits <= 256 ? 1 : (filterBlockBits / 256);
+    static constexpr uint64_t queryGroupSize = 1;
     static constexpr uint64_t maxRunKmers = cudaBlockSize;
 
     static_assert(k > 0, "k must be positive");
@@ -101,7 +101,7 @@ __global__ void containsKmersKernel(
 );
 
 template <typename Config>
-__global__ void containsPackedKmersKernel(
+__global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersKernel(
     PackedKmerInput<Config> input,
     uint64_t numShards,
     const typename Filter<Config>::Shard* shards,
@@ -124,7 +124,7 @@ __global__ void
 insertKmersKernel(Input input, uint64_t numShards, typename Filter<Config>::Shard* shards);
 
 template <typename Config>
-__global__ void insertPackedKmersKernel(
+__global__ void __launch_bounds__(Config::cudaBlockSize, 3) insertPackedKmersKernel(
     PackedKmerInput<Config> input,
     uint64_t numShards,
     typename Filter<Config>::Shard* shards
@@ -428,7 +428,7 @@ class Filter {
     );
     static_assert(
         Config::queryGroupSize == 1,
-        "Fused path expects vertical lookup mapping (one thread per queried key)"
+        "Fused path expects Theta=1 independent query mapping"
     );
     static_assert(
         Config::insertGroupSize == Config::blockWordCount,
@@ -819,6 +819,7 @@ struct PackedKmerInput {
 template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t packedKmerMinimizerHash(uint64_t packedKmer) {
     uint64_t minimizerHash = kInvalidHash;
+#pragma unroll 1
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t packedMmer =
             extractPackedSubwindow<Config::m, Config::k>(packedKmer, offset);
@@ -843,14 +844,14 @@ template <typename Config>
     typename Filter<Config>::WordType word3
 ) {
     typename Config::WordType req0 = 0, req1 = 0, req2 = 0, req3 = 0;
+#pragma unroll 1
     for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
         Filter<Config>::Shard::hashToWordMasks4(
-            packedKmerSmerHash<Config>(packedKmer, smerOffset),
-            req0, req1, req2, req3
+            packedKmerSmerHash<Config>(packedKmer, smerOffset), req0, req1, req2, req3
         );
     }
-    return (word0 & req0) == req0 && (word1 & req1) == req1 &&
-           (word2 & req2) == req2 && (word3 & req3) == req3;
+    return (word0 & req0) == req0 && (word1 & req1) == req1 && (word2 & req2) == req2 &&
+           (word3 & req3) == req3;
 }
 
 template <typename Config>
@@ -1062,12 +1063,13 @@ __global__ void containsKmersKernel(
 }
 
 template <typename Config>
-__global__ void containsPackedKmersKernel(
+__global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersKernel(
     PackedKmerInput<Config> input,
     uint64_t numShards,
     const typename Filter<Config>::Shard* shards,
     uint8_t* output
 ) {
+    // Each thread independently queries its own k-mer
     const uint64_t kmerIndex = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (kmerIndex >= input.count) {
         return;
@@ -1076,15 +1078,11 @@ __global__ void containsPackedKmersKernel(
     const uint64_t packedKmer = input.kmers[kmerIndex];
     const uint64_t minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
 
-    typename Config::WordType word0 = 0;
-    typename Config::WordType word1 = 0;
-    typename Config::WordType word2 = 0;
-    typename Config::WordType word3 = 0;
+    typename Config::WordType word0, word1, word2, word3;
     loadShardWords4<Config>(shards, minimizerHash & (numShards - 1), word0, word1, word2, word3);
 
-    output[kmerIndex] = static_cast<uint8_t>(
-        containsPackedKmerWords4<Config>(packedKmer, word0, word1, word2, word3)
-    );
+    const bool present = containsPackedKmerWords4<Config>(packedKmer, word0, word1, word2, word3);
+    output[kmerIndex] = static_cast<uint8_t>(present);
 }
 
 template <typename Config, typename Input>
@@ -1107,7 +1105,7 @@ insertKmersKernel(Input input, uint64_t numShards, typename Filter<Config>::Shar
 
     const uint64_t blockKmers =
         min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
-    const uint64_t localKmerIndex = static_cast<uint64_t>(threadIdx.x);
+    const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     const bool inRange = localKmerIndex < blockKmers;
 
     typename Config::WordType wordMask0 = 0;
@@ -1207,63 +1205,47 @@ insertKmersKernel(Input input, uint64_t numShards, typename Filter<Config>::Shar
 }
 
 template <typename Config>
-__global__ void insertPackedKmersKernel(
+__global__ void __launch_bounds__(Config::cudaBlockSize, 3) insertPackedKmersKernel(
     PackedKmerInput<Config> input,
     uint64_t numShards,
     typename Filter<Config>::Shard* shards
 ) {
+    using WordType = typename Config::WordType;
+
     auto block = cg::this_thread_block();
-    auto tile = cg::tiled_partition<Config::blockWordCount>(block);
+    auto tile = cg::tiled_partition<Config::insertGroupSize>(block);
 
-    const uint64_t numKmers = input.kmerCount();
-    const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
-    if (blockStartKmer >= numKmers) {
-        return;
-    }
+    // cooperative insert with coalesced atomicOr per shard word
+    const uint64_t kmerIndex = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const bool inRange = kmerIndex < input.count;
 
-    const uint64_t blockKmers =
-        min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
-    const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
-    const bool inRange = localKmerIndex < blockKmers;
-
+    uint64_t packedKmer = 0;
     uint64_t minimizerHash = 0;
-    typename Config::WordType localMask0 = 0;
-    typename Config::WordType localMask1 = 0;
-    typename Config::WordType localMask2 = 0;
-    typename Config::WordType localMask3 = 0;
-
     if (inRange) {
-        const uint64_t kmerIndex = blockStartKmer + localKmerIndex;
-        const uint64_t packedKmer = input.kmers[kmerIndex];
+        packedKmer = input.kmers[kmerIndex];
         minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
-        packedKmerWordMasks4<Config>(packedKmer, localMask0, localMask1, localMask2, localMask3);
     }
 
     const uint32_t lane = tile.thread_rank();
 
     _Pragma("unroll")
-    for (uint32_t sourceLane = 0; sourceLane < Config::blockWordCount; ++sourceLane) {
-        const bool sourceActive = tile.shfl(static_cast<uint32_t>(inRange), sourceLane) != 0;
-        if (!sourceActive) {
+    for (uint32_t src = 0; src < Config::insertGroupSize; ++src) {
+        const bool srcActive = tile.shfl(static_cast<uint32_t>(inRange), src) != 0;
+        if (!srcActive)
             continue;
+
+        const uint64_t srcMinHash = tile.shfl(minimizerHash, src);
+        const uint64_t srcPackedKmer = tile.shfl(packedKmer, src);
+
+        // Each lane computes mask for ONLY its own word
+        WordType laneMask = 0;
+        for (uint64_t s = 0; s < Config::findereSpan; ++s) {
+            const uint64_t smerHash = packedKmerSmerHash<Config>(srcPackedKmer, s);
+            laneMask |= Filter<Config>::Shard::hashToWordMask4(smerHash, lane);
         }
 
-        const uint64_t activeMinimizerHash = tile.shfl(minimizerHash, sourceLane);
-
-        const typename Config::WordType sourceMask0 = tile.shfl(localMask0, sourceLane);
-        const typename Config::WordType sourceMask1 = tile.shfl(localMask1, sourceLane);
-        const typename Config::WordType sourceMask2 = tile.shfl(localMask2, sourceLane);
-        const typename Config::WordType sourceMask3 = tile.shfl(localMask3, sourceLane);
-
-        const typename Config::WordType laneMask =
-            (static_cast<typename Config::WordType>(lane == 0) * sourceMask0) |
-            (static_cast<typename Config::WordType>(lane == 1) * sourceMask1) |
-            (static_cast<typename Config::WordType>(lane == 2) * sourceMask2) |
-            (static_cast<typename Config::WordType>(lane == 3) * sourceMask3);
-
         if (laneMask != 0) {
-            auto& shard = shards[activeMinimizerHash & (numShards - 1)];
-            atomicOrWord(&shard.words[lane], laneMask);
+            atomicOrWord(&shards[srcMinHash & (numShards - 1)].words[lane], laneMask);
         }
     }
 }
