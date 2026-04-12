@@ -15,7 +15,7 @@ echo "Output directory: $GENOME_DIR"
 echo ""
 
 # E. coli K-12 MG1655 complete genome
-echo "[1/7] Downloading E. coli K-12 MG1655 genome..."
+echo "[1/8] Downloading E. coli K-12 MG1655 genome..."
 if [ -f "$GENOME_DIR/ecoli_k12_mg1655.fna" ]; then
     echo "Already exists, skipping"
 else
@@ -26,7 +26,7 @@ else
 fi
 
 # Human chromosome 14
-echo "[2/7] Downloading Human chromosome 14..."
+echo "[2/8] Downloading Human chromosome 14..."
 if [ -f "$GENOME_DIR/chr14.fna" ]; then
     echo "Already exists, skipping"
 else
@@ -37,7 +37,7 @@ else
 fi
 
 # Rice Genome (Oryza sativa)
-echo "[3/7] Downloading Rice Genome (Oryza sativa)..."
+echo "[3/8] Downloading Rice Genome (Oryza sativa)..."
 if [ -f "$GENOME_DIR/rice.fna" ]; then
     echo "Already exists, skipping"
 else
@@ -48,7 +48,7 @@ else
 fi
 
 # Chicken Genome (Gallus gallus)
-echo "[4/7] Downloading Chicken Genome (Gallus gallus)..."
+echo "[4/8] Downloading Chicken Genome (Gallus gallus)..."
 if [ -f "$GENOME_DIR/chicken.fna" ]; then
     echo "Already exists, skipping"
 else
@@ -59,7 +59,7 @@ else
 fi
 
 # Zebrafish Genome (Danio rerio)
-echo "[5/7] Downloading Zebrafish Genome (Danio rerio)..."
+echo "[5/8] Downloading Zebrafish Genome (Danio rerio)..."
 if [ -f "$GENOME_DIR/zebrafish.fna" ]; then
     echo "Already exists, skipping"
 else
@@ -70,24 +70,35 @@ else
 fi
 
 # Full Human Genome
-echo "[6/7] Downloading Full Human Genome..."
+echo "[6/8] Downloading Full Human Genome..."
 if [ -f "$GENOME_DIR/human_t2t-chm13v2.0.fna" ]; then
     echo "Already exists, skipping"
 else
     wget -O "$GENOME_DIR/human_t2t-chm13v2.0.fna.gz" \
-        "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz"
+        "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/855/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz"
     gunzip "$GENOME_DIR/human_t2t-chm13v2.0.fna.gz"
     echo "Downloaded and extracted"
 fi
 
 # Wheat Genome (Triticum aestivum)
-echo "[7/7] Downloading Wheat Genome (Triticum aestivum)..."
+echo "[7/8] Downloading Wheat Genome (Triticum aestivum)..."
 if [ -f "$GENOME_DIR/wheat.fna" ]; then
     echo "Already exists, skipping"
 else
     wget -O "$GENOME_DIR/wheat.fna.gz" \
         "https://ftp.ensemblgenomes.ebi.ac.uk/pub/plants/release-59/fasta/triticum_aestivum/dna/Triticum_aestivum.IWGSC.dna.toplevel.fa.gz"
     gunzip "$GENOME_DIR/wheat.fna.gz"
+    echo "Downloaded and extracted"
+fi
+
+# Caenorhabditis elegans (WBcel235 reference)
+echo "[8/8] Downloading Caenorhabditis elegans (WBcel235 reference)..."
+if [ -f "$GENOME_DIR/WBcel235.fna" ]; then
+    echo "Already exists, skipping"
+else
+    wget -O "$GENOME_DIR/WBcel235.fna.gz" \
+        "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/002/985/GCF_000002985.6_WBcel235/GCF_000002985.6_WBcel235_genomic.fna.gz"
+    gunzip "$GENOME_DIR/WBcel235.fna.gz"
     echo "Downloaded and extracted"
 fi
 

@@ -189,5 +189,19 @@ else
     echo ""
 fi
 
+if [ -f "$GENOME_DIR/WBcel235.fna" ]; then
+    echo ""
+    echo "Caenorhabditis elegans (WBcel235 reference)"
+    echo ""
+    for k in "${K_VALUES[@]}"; do
+        extract_kmers "$GENOME_DIR/WBcel235.fna" "c_elegans" "$k"
+    done
+    echo ""
+else
+    echo "Warning: C. elegans genome not found, skipping"
+    echo "Run ./scripts/download_genomes.sh first"
+    echo ""
+fi
+
 echo "Extraction complete"
 echo "Binary files are ready for benchmarks in: $KMER_DIR"
