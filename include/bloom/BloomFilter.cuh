@@ -822,7 +822,7 @@ template <typename Config>
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t packedMmer =
             extractPackedSubwindow<Config::m, Config::k>(packedKmer, offset);
-        minimizerHash = min(minimizerHash, xxhash::hash64(packedMmer));
+        minimizerHash = min(minimizerHash, detail::hash64(packedMmer));
     }
     return minimizerHash;
 }
@@ -831,7 +831,7 @@ template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
     const uint64_t packedSmer = extractPackedSubwindow<Config::s, Config::k>(packedKmer, start);
-    return xxhash::hash64(packedSmer);
+    return detail::hash64(packedSmer);
 }
 
 template <typename Config>
@@ -916,13 +916,13 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
     for (uint64_t idx = threadIdx.x; idx < blockMmers; idx += Config::cudaBlockSize) {
         if (blockAllValid) {
             const uint64_t packedMmer = packEncodedWindowUnchecked<Config::m>(sequenceTile, idx);
-            mmerHashes[idx] = xxhash::hash64(packedMmer);
+            mmerHashes[idx] = detail::hash64(packedMmer);
         } else {
             uint64_t packedMmer = 0;
             if (!encodeWindow<Config::m>(sequenceTile, idx, packedMmer)) {
                 mmerHashes[idx] = kInvalidHash;
             } else {
-                mmerHashes[idx] = xxhash::hash64(packedMmer);
+                mmerHashes[idx] = detail::hash64(packedMmer);
             }
         }
     }
@@ -932,13 +932,13 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
     for (uint64_t idx = threadIdx.x; idx < blockSmers; idx += Config::cudaBlockSize) {
         if (blockAllValid) {
             const uint64_t packedSmer = packEncodedWindowUnchecked<Config::s>(sequenceTile, idx);
-            smerHashes[idx] = xxhash::hash64(packedSmer);
+            smerHashes[idx] = detail::hash64(packedSmer);
         } else {
             uint64_t packedSmer = 0;
             if (!encodeWindow<Config::s>(sequenceTile, idx, packedSmer)) {
                 smerHashes[idx] = kInvalidHash;
             } else {
-                smerHashes[idx] = xxhash::hash64(packedSmer);
+                smerHashes[idx] = detail::hash64(packedSmer);
             }
         }
     }
