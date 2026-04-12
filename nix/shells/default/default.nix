@@ -37,7 +37,14 @@ let
 
     cudaPkgs.nsight_systems
     cudaPkgs.nsight_compute
+
+    rust-toolchain
+    rust-analyzer
   ];
+
+  rust-toolchain = pkgs.rust-bin.stable.latest.default.override {
+    extensions = [ "rust-src" ];
+  };
 in
 
 mkShell {

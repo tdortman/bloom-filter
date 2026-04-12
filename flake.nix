@@ -7,6 +7,10 @@
       url = "github:snowfallorg/lib";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -19,6 +23,10 @@
         root = ./nix;
         namespace = "bloom";
       };
+
+      overlays = [
+        inputs.rust-overlay.overlays.default
+      ];
 
       channels-config = {
         allowUnfree = true;
