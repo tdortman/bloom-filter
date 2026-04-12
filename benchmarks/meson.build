@@ -50,7 +50,7 @@ executable(
 executable(
     'superbloom-gpu-benchmark',
     'superbloom_gpu_benchmark.cu',
-    dependencies: [bloom_dep, cli11_dep],
+    dependencies: [bloom_dep, cli11_dep, benchmark_dep],
     cuda_args: cuda_args,
     install: false,
 )

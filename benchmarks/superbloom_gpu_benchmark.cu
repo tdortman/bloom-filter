@@ -1,7 +1,6 @@
 #include <CLI/CLI.hpp>
 #include <cuda_runtime.h>
 
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -11,21 +10,10 @@
 #include <bloom/BloomFilter.cuh>
 #include <bloom/helpers.cuh>
 
+#include "benchmark_common.cuh"
+
 // Fixed compile-time configuration: K=31, S=27, M=21, H=3
 using BenchConfig = bloom::Config<31, 27, 21, 3>;
-
-struct Timer {
-    using Clock = std::chrono::steady_clock;
-
-    void start() { start_ = Clock::now(); }
-
-    [[nodiscard]] double elapsed() const {
-        return std::chrono::duration<double>(Clock::now() - start_).count();
-    }
-
-   private:
-    Clock::time_point start_{};
-};
 
 int main(int argc, char** argv) {
     CLI::App app{"GPU SuperBloom benchmark"};
@@ -54,7 +42,7 @@ int main(int argc, char** argv) {
                   << " M=" << BenchConfig::m << " H=" << BenchConfig::hashCount << "\n";
         std::cout << "filter bits: " << filterBits << "\n";
 
-        Timer timer;
+        benchmark_common::GPUTimer timer;
 
         timer.start();
         bloom::Filter<BenchConfig> filter(filterBits);
