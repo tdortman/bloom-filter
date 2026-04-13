@@ -12,8 +12,8 @@
 
 #include "benchmark_common.cuh"
 
-// Fixed compile-time configuration: K=31, S=27, M=21, H=3
-using BenchConfig = bloom::Config<31, 27, 21, 3>;
+// Fixed compile-time configuration: K=31, S=27, M=21, H=4
+using BenchConfig = bloom::Config<31, 27, 21, 4>;
 
 int main(int argc, char** argv) {
     CLI::App app{"GPU SuperBloom benchmark"};

@@ -27,17 +27,17 @@ using CucoBloom = cuco::bloom_filter<uint64_t>;
 
 // It's K - S - M - H
 
-#define SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(X) X(31, 27, 21, 3)
+#define SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(X) X(31, 27, 21, 4)
 
 #define SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR(X) SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(X)
 
 #define SUPERBLOOM_CONFIGS_FPR_ONLY(X) \
-    X(31, 31, 21, 3)                   \
-    X(31, 30, 21, 3)                   \
-    X(31, 28, 21, 3)                   \
-    X(31, 24, 21, 3)                   \
-    X(31, 20, 21, 3)                   \
-    X(31, 16, 21, 3)
+    X(31, 31, 21, 4)                   \
+    X(31, 30, 21, 4)                   \
+    X(31, 28, 21, 4)                   \
+    X(31, 24, 21, 4)                   \
+    X(31, 20, 21, 4)                   \
+    X(31, 16, 21, 4)
 
 #define FOR_EACH_SUPERBLOOM_CONFIG(X)      \
     SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR(X) \
@@ -227,7 +227,7 @@ class SuperBloomConfigFixture : public SuperBloomFixtureBase<Config> {
 #define SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Fixture
 
 #define DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE(K, S, M, H)                              \
-    using SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) = bloom::Config<K, S, M, H, 512>; \
+    using SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) = bloom::Config<K, S, M, H, 256>; \
     using SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) =                                     \
         SuperBloomConfigFixture<SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H)>;
 
