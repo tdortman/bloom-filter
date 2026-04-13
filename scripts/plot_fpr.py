@@ -32,6 +32,10 @@ LEGACY_FPR_FILTERS = {
 SUPERBLOOM_FIXTURE_PATTERN = re.compile(
     r"^SuperBloomFixture(?P<s>\d+)?$", re.IGNORECASE
 )
+SUPERBLOOM_CONFIG_FIXTURE_PATTERN = re.compile(
+    r"^SuperBloom_K(?P<k>\d+)_S(?P<s>\d+)_M(?P<m>\d+)_H(?P<h>\d+)_Fixture$",
+    re.IGNORECASE,
+)
 CUCO_FIXTURE_PATTERN = re.compile(r"^CucoBloomFixture$", re.IGNORECASE)
 
 SUPERBLOOM_VARIANT_MARKERS = ["o", "s", "^", "D", "P", "X", "v", "<", ">"]
@@ -50,19 +54,23 @@ def extract_legacy_filter_type(name: str) -> Optional[str]:
 def parse_superbloom_variant(fixture_name: str, row: pd.Series) -> Optional[int]:
     """Parse SuperBloom variant ``s`` value from fixture name or CSV counters."""
     match = SUPERBLOOM_FIXTURE_PATTERN.match(fixture_name)
-    if match is None:
+    if match is not None:
+        fixture_suffix = match.group("s")
+        if fixture_suffix is not None:
+            return int(fixture_suffix)
+
+        row_s = row.get("s")
+        if pd.notna(row_s):
+            try:
+                return int(float(row_s))
+            except (TypeError, ValueError):
+                return None
+
         return None
 
-    fixture_suffix = match.group("s")
-    if fixture_suffix is not None:
-        return int(fixture_suffix)
-
-    row_s = row.get("s")
-    if pd.notna(row_s):
-        try:
-            return int(float(row_s))
-        except (TypeError, ValueError):
-            return None
+    config_match = SUPERBLOOM_CONFIG_FIXTURE_PATTERN.match(fixture_name)
+    if config_match is not None:
+        return int(config_match.group("s"))
 
     return None
 

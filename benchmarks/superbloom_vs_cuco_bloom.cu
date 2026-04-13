@@ -178,6 +178,9 @@ BenchmarkData<K>& getBenchmarkData(uint64_t length) {
         return it->second;
     }
 
+    // Evict all old entries to avoid accumulating GPU memory across sizes.
+    cache.clear();
+
     BenchmarkData<K> data;
     data.sequenceLength = length;
     data.generateThroughputData();
