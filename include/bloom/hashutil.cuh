@@ -165,9 +165,7 @@ __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
 }  // namespace xxhash
 
 namespace bloom::detail {
-/**
- * See https://zimbry.blogspot.com/2011/09/better-bit-mixing-improving-on.html
- */
+
 __host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
     key ^= key >> 30;
     key *= 0xbf58476d1ce4e5b9ULL;
@@ -176,4 +174,78 @@ __host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
     key ^= key >> 31;
     return key;
 }
-}  // namespace detail
+
+namespace nthash {
+
+constexpr uint64_t SEED_A = 0x3c8bfbb395c60474ULL;
+constexpr uint64_t SEED_C = 0x3193c18562a02b4cULL;
+constexpr uint64_t SEED_G = 0x20323ed082572324ULL;
+constexpr uint64_t SEED_T = 0x295549f54be24456ULL;
+
+constexpr uint64_t SEED_TAB[4] = {SEED_A, SEED_C, SEED_G, SEED_T};
+
+__host__ __device__ __forceinline__ uint64_t seedForBase(uint8_t base) {
+    // clang-format off
+    switch (base & 0x3u) {
+        case 0: return SEED_A;
+        case 1: return SEED_C;
+        case 2: return SEED_G;
+        default: return SEED_T;
+    }
+    // clang-format on
+}
+
+constexpr uint64_t srolValue(uint64_t x) {
+    uint64_t m = ((x & 0x8000000000000000ULL) >> 30) | ((x & 0x100000000ULL) >> 32);
+    return ((x << 1) & 0xFFFFFFFDFFFFFFFFULL) | m;
+}
+
+template <uint64_t D>
+constexpr uint64_t srolnValue(uint64_t x) {
+    uint64_t r = x;
+    for (uint64_t i = 0; i < D; ++i) {
+        r = srolValue(r);
+    }
+    return r;
+}
+
+__host__ __device__ __forceinline__ uint64_t srol(uint64_t x) {
+    uint64_t m = ((x & 0x8000000000000000ULL) >> 30) | ((x & 0x100000000ULL) >> 32);
+    return ((x << 1) & 0xFFFFFFFDFFFFFFFFULL) | m;
+}
+
+template <uint64_t WindowLength>
+__device__ __forceinline__ uint64_t rolledSeed(uint8_t base) {
+    constexpr uint64_t rs0 = srolnValue<WindowLength>(SEED_TAB[0]);
+    constexpr uint64_t rs1 = srolnValue<WindowLength>(SEED_TAB[1]);
+    constexpr uint64_t rs2 = srolnValue<WindowLength>(SEED_TAB[2]);
+    constexpr uint64_t rs3 = srolnValue<WindowLength>(SEED_TAB[3]);
+
+    // clang-format off
+    switch (base & 0x3u) {
+        case 0: return rs0;
+        case 1: return rs1;
+        case 2: return rs2;
+        default: return rs3;
+    }
+    // clang-format on
+}
+
+template <uint64_t WindowLength>
+__device__ __forceinline__ uint64_t baseHash(const uint8_t* encodedBases, uint64_t start) {
+    uint64_t h = 0;
+    _Pragma("unroll")
+    for (uint64_t i = 0; i < WindowLength; ++i) {
+        h = srol(h) ^ seedForBase(encodedBases[start + i]);
+    }
+    return h;
+}
+
+template <uint64_t WindowLength>
+__device__ __forceinline__ uint64_t rollHash(uint64_t h, uint8_t baseOut, uint8_t baseIn) {
+    return srol(h) ^ seedForBase(baseIn) ^ rolledSeed<WindowLength>(baseOut);
+}
+
+}  // namespace nthash
+
+}  // namespace bloom::detail
