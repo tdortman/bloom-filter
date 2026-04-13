@@ -55,38 +55,34 @@ std::vector<uint64_t> packValidKmers(std::string_view sequence) {
 
 }  // namespace
 
-TEST_F(BloomFilterTest, PackedInsertSupportsSequenceQuery) {
+TEST_F(BloomFilterTest, PackedInsertSupportsPackedQuery) {
     bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGT";
     const auto kmers = packValidKmers<TestConfig::k>(sequence);
 
     ASSERT_EQ(filter.insertPackedKmers(kmers), kmers.size());
-    const auto hits = filter.containsSequence(sequence);
+    const auto hits = filter.containsPackedKmers(kmers);
 
     ASSERT_EQ(hits.size(), kmers.size());
     EXPECT_TRUE(allOnes(hits));
 }
 
-TEST_F(BloomFilterTest, PackedQueryMatchesHostAndDeviceResults) {
+TEST_F(BloomFilterTest, SequenceQueryMatchesHostAndDeviceResults) {
     bloom::Filter<TestConfig> filter(1 << 12);
 
     const std::string sequence = "ACGTACGTACGT";
-    const auto kmers = packValidKmers<TestConfig::k>(sequence);
-    std::vector<uint64_t> query = kmers;
-    query.push_back(packKmer<TestConfig::k>("TTTTT"));
 
     (void)filter.insertSequence(sequence);
 
-    const auto hostHits = filter.containsPackedKmers(query);
-    ASSERT_EQ(hostHits.size(), query.size());
-    ASSERT_EQ(hostHits.back(), uint8_t{0});
-    EXPECT_TRUE(allOnes(std::vector<uint8_t>(hostHits.begin(), hostHits.end() - 1)));
+    const auto hostHits = filter.containsSequence(sequence);
+    ASSERT_EQ(hostHits.size(), sequence.size() - TestConfig::k + 1);
+    EXPECT_TRUE(allOnes(hostHits));
 
     uint8_t* d_output = nullptr;
     ASSERT_EQ(cudaMalloc(&d_output, hostHits.size() * sizeof(uint8_t)), cudaSuccess);
 
-    filter.containsPackedKmers(query.data(), query.size(), d_output);
+    filter.containsSequence(sequence.data(), sequence.size(), d_output);
 
     std::vector<uint8_t> deviceHits(hostHits.size());
     ASSERT_EQ(
@@ -124,10 +120,7 @@ TEST_F(BloomFilterTest, PackedInsertTailCountNotDivisibleByFourSupportsQueries) 
     ASSERT_EQ(filter.insertPackedKmers(kmers.data(), kmers.size()), kmers.size());
 
     const auto packedHits = filter.containsPackedKmers(kmers);
-    const auto sequenceHits = filter.containsSequence(sequence);
-
     EXPECT_TRUE(allOnes(packedHits));
-    EXPECT_TRUE(allOnes(sequenceHits));
 }
 
 TEST_F(BloomFilterTest, PackedTailQueryMatchesHostAndDeviceResults) {
