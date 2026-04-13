@@ -114,8 +114,11 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
 );
 
 template <typename Config>
-__global__ void
-insertSequenceKmersKernel(SequenceKmerInput<Config> input, uint64_t numShards, typename Filter<Config>::Shard* shards);
+__global__ void insertSequenceKmersKernel(
+    SequenceKmerInput<Config> input,
+    uint64_t numShards,
+    typename Filter<Config>::Shard* shards
+);
 
 template <typename Config>
 __global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKernel(
@@ -437,9 +440,8 @@ class Filter {
         return totalKmers;
     }
 
-    [[nodiscard]] uint64_t insertSequenceDevice(
-        const char* d_sequence, uint64_t length, cudaStream_t stream = {}
-    ) {
+    [[nodiscard]] uint64_t
+    insertSequenceDevice(const char* d_sequence, uint64_t length, cudaStream_t stream = {}) {
         if (d_sequence == nullptr || length < Config::k) {
             return 0;
         }
@@ -466,9 +468,8 @@ class Filter {
         return count;
     }
 
-    [[nodiscard]] uint64_t insertPackedKmersDevice(
-        const uint64_t* d_kmers, uint64_t count, cudaStream_t stream = {}
-    ) {
+    [[nodiscard]] uint64_t
+    insertPackedKmersDevice(const uint64_t* d_kmers, uint64_t count, cudaStream_t stream = {}) {
         if (d_kmers == nullptr || count == 0) {
             return 0;
         }
@@ -918,12 +919,8 @@ __global__ void containsSequenceKmersKernel(
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     const bool inRange = localKmerIndex < blockKmers;
 
-    const bool blockAllValid = prepareSequenceHashTiles<Config>(
-        input.sequence,
-        blockStartKmer,
-        blockKmers,
-        sequenceTile
-    );
+    const bool blockAllValid =
+        prepareSequenceHashTiles<Config>(input.sequence, blockStartKmer, blockKmers, sequenceTile);
 
     if (!inRange) {
         return;
@@ -1005,8 +1002,11 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersK
 }
 
 template <typename Config>
-__global__ void
-insertSequenceKmersKernel(SequenceKmerInput<Config> input, uint64_t numShards, typename Filter<Config>::Shard* shards) {
+__global__ void insertSequenceKmersKernel(
+    SequenceKmerInput<Config> input,
+    uint64_t numShards,
+    typename Filter<Config>::Shard* shards
+) {
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
@@ -1022,12 +1022,8 @@ insertSequenceKmersKernel(SequenceKmerInput<Config> input, uint64_t numShards, t
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     const bool inRange = localKmerIndex < blockKmers;
 
-    const bool blockAllValid = prepareSequenceHashTiles<Config>(
-        input.sequence,
-        blockStartKmer,
-        blockKmers,
-        sequenceTile
-    );
+    const bool blockAllValid =
+        prepareSequenceHashTiles<Config>(input.sequence, blockStartKmer, blockKmers, sequenceTile);
 
     if (!inRange) {
         return;

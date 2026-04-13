@@ -1,5 +1,5 @@
-#include <CLI/CLI.hpp>
 #include <cuda_runtime.h>
+#include <CLI/CLI.hpp>
 
 #include <cstdint>
 #include <cstdio>
@@ -28,8 +28,7 @@ int main(int argc, char** argv) {
     app.add_option("--query-fasta,-q", queryFasta, "FASTA/FASTQ file to query")
         ->required()
         ->check(CLI::ExistingFile);
-    app.add_option("--filter-bits", filterBits, "Total bloom filter bits")
-        ->default_val(filterBits);
+    app.add_option("--filter-bits", filterBits, "Total bloom filter bits")->default_val(filterBits);
 
     CLI11_PARSE(app, argc, argv);
 
@@ -78,12 +77,6 @@ int main(int argc, char** argv) {
             );
         }
 
-        double fpr = 0.0;
-        if (queryReport.queriedKmers > 0) {
-            fpr = static_cast<double>(queryReport.positiveKmers) /
-                  static_cast<double>(queryReport.queriedKmers) * 100.0;
-        }
-        std::printf("fpr_percentage: %.6f\n", fpr);
         std::printf("load_factor: %.6f\n", filter.loadFactor());
         std::printf("actual_filter_bits: %lu\n", filter.filterBits());
 
