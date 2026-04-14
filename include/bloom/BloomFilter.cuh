@@ -589,7 +589,7 @@ class Filter {
             wordsBegin + totalWords,
             [] __device__(WordType w) -> uint64_t { return cuda::std::popcount(w); },
             uint64_t{0},
-            thrust::plus<uint64_t>{}
+            cuda::std::plus<uint64_t>()
         );
         return static_cast<float>(setBits) / static_cast<float>(filterBits_);
     }
