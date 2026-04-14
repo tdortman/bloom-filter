@@ -6,8 +6,8 @@
 }:
 
 let
-  cudaPkgs = pkgs.cudaPackages_12_9;
-  llvm = pkgs.llvmPackages_21;
+  cudaPkgs = pkgs.cudaPackages_13_2;
+  llvm = pkgs.llvmPackages_22;
 
   cuda = {
     arch = "1200";
@@ -98,6 +98,7 @@ mkShell {
         - undeclared_var_use_suggest
         - typename_invalid_functionspec
         - expected_expression
+        - deduction_guide_target_attr
     EOF
           echo ".clangd created by flake shellHook"
         fi
