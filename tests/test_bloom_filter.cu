@@ -1,4 +1,8 @@
+#include <thrust/device_vector.h>
+#include <cuda/std/span>
 #include <string>
+
+#include <bloom/device_span.cuh>
 
 #include "test_support.hpp"
 
@@ -54,22 +58,27 @@ TEST_F(BloomFilterTest, ShortSequenceInsertAndQueryReturnEmpty) {
 TEST_F(BloomFilterTest, ShortSequenceDeviceOutputBufferRemainsUnchanged) {
     bloom::Filter<TestConfig> filter(1 << 12);
 
-    const std::string shortSequence = "ACGT";
-    uint8_t* d_output = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_output, sizeof(uint8_t)), cudaSuccess);
+    thrust::device_vector<char> d_sequence({'A', 'C', 'G', 'T'});
+    thrust::device_vector<uint8_t> d_output(1, uint8_t{0xAB});
 
-    uint8_t sentinel = 0xAB;
-    ASSERT_EQ(
-        cudaMemcpy(d_output, &sentinel, sizeof(uint8_t), cudaMemcpyHostToDevice), cudaSuccess
+    filter.containsSequenceDevice(
+        bloom::device_span<const char>{
+            thrust::raw_pointer_cast(d_sequence.data()), d_sequence.size()
+        },
+        bloom::device_span<uint8_t>{thrust::raw_pointer_cast(d_output.data()), d_output.size()}
     );
 
-    filter.containsSequence(shortSequence.data(), shortSequence.size(), d_output);
-
     uint8_t after = 0;
-    ASSERT_EQ(cudaMemcpy(&after, d_output, sizeof(uint8_t), cudaMemcpyDeviceToHost), cudaSuccess);
-    EXPECT_EQ(after, sentinel);
-
-    ASSERT_EQ(cudaFree(d_output), cudaSuccess);
+    ASSERT_EQ(
+        cudaMemcpy(
+            &after,
+            thrust::raw_pointer_cast(d_output.data()),
+            sizeof(uint8_t),
+            cudaMemcpyDeviceToHost
+        ),
+        cudaSuccess
+    );
+    EXPECT_EQ(after, uint8_t{0xAB});
 }
 
 TEST_F(BloomFilterTest, ClearResetsMembership) {
@@ -93,21 +102,19 @@ TEST_F(BloomFilterTest, DeviceOutputMatchesHostContainsResults) {
     const auto hostHits = filter.containsSequence(querySequence);
     ASSERT_FALSE(hostHits.empty());
 
-    uint8_t* d_output = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_output, hostHits.size() * sizeof(uint8_t)), cudaSuccess);
+    thrust::device_vector<char> d_query(querySequence.begin(), querySequence.end());
+    thrust::device_vector<uint8_t> d_output(hostHits.size());
 
-    filter.containsSequence(querySequence.data(), querySequence.size(), d_output);
+    filter.containsSequenceDevice(
+        bloom::device_span<const char>{thrust::raw_pointer_cast(d_query.data()), d_query.size()},
+        bloom::device_span<uint8_t>{thrust::raw_pointer_cast(d_output.data()), d_output.size()}
+    );
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<uint8_t> deviceHits(hostHits.size());
-    ASSERT_EQ(
-        cudaMemcpy(
-            deviceHits.data(), d_output, hostHits.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost
-        ),
-        cudaSuccess
-    );
+    thrust::copy(d_output.begin(), d_output.end(), deviceHits.begin());
 
     EXPECT_EQ(deviceHits, hostHits);
-    ASSERT_EQ(cudaFree(d_output), cudaSuccess);
 }
 
 TEST_F(BloomFilterTest, MultipleInsertionsRemainQueryable) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cuda/std/bit>
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -49,8 +51,8 @@ constexpr uint64_t PRIME64_3 = 1609587929392839161ULL;
 constexpr uint64_t PRIME64_4 = 9650029242287828579ULL;
 constexpr uint64_t PRIME64_5 = 2870177450012600261ULL;
 
-__host__ __device__ __forceinline__ uint64_t rotl64(uint64_t x, int8_t r) {
-    return (x << r) | (x >> (64 - r));
+constexpr __host__ __device__ __forceinline__ uint64_t rotl64(uint64_t x, int8_t r) {
+    return cuda::std::rotl(x, static_cast<int>(r));
 }
 
 template <typename T>
@@ -60,7 +62,7 @@ __host__ __device__ __forceinline__ T load_chunk(const uint8_t* data, uint64_t i
     return chunk;
 }
 
-__host__ __device__ __forceinline__ uint64_t finalize(uint64_t h) {
+constexpr __host__ __device__ __forceinline__ uint64_t finalize(uint64_t h) {
     h ^= h >> 33;
     h *= PRIME64_2;
     h ^= h >> 29;
@@ -166,7 +168,7 @@ __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
 
 namespace bloom::detail {
 
-__host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
+constexpr __host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
     key ^= key >> 30;
     key *= 0xbf58476d1ce4e5b9ULL;
     key ^= key >> 27;
@@ -184,7 +186,7 @@ constexpr uint64_t SEED_T = 0x295549f54be24456ULL;
 
 constexpr uint64_t SEED_TAB[4] = {SEED_A, SEED_C, SEED_G, SEED_T};
 
-__host__ __device__ __forceinline__ uint64_t seedForBase(uint8_t base) {
+constexpr __host__ __device__ __forceinline__ uint64_t seedForBase(uint8_t base) {
     // clang-format off
     switch (base & 0x3u) {
         case 0: return SEED_A;
@@ -195,7 +197,7 @@ __host__ __device__ __forceinline__ uint64_t seedForBase(uint8_t base) {
     // clang-format on
 }
 
-constexpr uint64_t srolValue(uint64_t x) {
+constexpr __host__ __device__ __forceinline__ uint64_t srol(uint64_t x) {
     uint64_t m = ((x & 0x8000000000000000ULL) >> 30) | ((x & 0x100000000ULL) >> 32);
     return ((x << 1) & 0xFFFFFFFDFFFFFFFFULL) | m;
 }
@@ -204,14 +206,9 @@ template <uint64_t D>
 constexpr uint64_t srolnValue(uint64_t x) {
     uint64_t r = x;
     for (uint64_t i = 0; i < D; ++i) {
-        r = srolValue(r);
+        r = srol(r);
     }
     return r;
-}
-
-__host__ __device__ __forceinline__ uint64_t srol(uint64_t x) {
-    uint64_t m = ((x & 0x8000000000000000ULL) >> 30) | ((x & 0x100000000ULL) >> 32);
-    return ((x << 1) & 0xFFFFFFFDFFFFFFFFULL) | m;
 }
 
 template <uint64_t WindowLength>

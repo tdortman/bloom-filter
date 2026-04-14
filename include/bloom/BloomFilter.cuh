@@ -3,6 +3,16 @@
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
+#include <cuda/std/bit>
+#include <cuda/std/span>
+#include <cuda/stream_ref>
+
+#include <thrust/copy.h>
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#include <thrust/fill.h>
+#include <thrust/transform_reduce.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "device_span.cuh"
 #include "Fastx.hpp"
 #include "hashutil.cuh"
 #include "helpers.cuh"
@@ -56,14 +67,26 @@ struct Config {
         "WordType must be uint32_t or uint64_t"
     );
     static_assert(filterBlockBits >= wordBits, "Filter block must contain at least one word");
-    static_assert(detail::powerOfTwo(filterBlockBits), "Filter block size must be a power of two");
+    static_assert(
+        cuda::std::has_single_bit(filterBlockBits),
+        "Filter block size must be a power of two"
+    );
     static_assert(filterBlockBits % wordBits == 0, "Filter block size must align to the word size");
     static_assert(blockWordCount <= 32, "At most one warp may cooperate on a filter block");
-    static_assert(detail::powerOfTwo(blockWordCount), "blockWordCount must be a power of two");
+    static_assert(
+        cuda::std::has_single_bit(blockWordCount),
+        "blockWordCount must be a power of two"
+    );
     static_assert(insertGroupSize <= 32, "insertGroupSize must fit in one warp");
     static_assert(queryGroupSize <= 32, "queryGroupSize must fit in one warp");
-    static_assert(detail::powerOfTwo(insertGroupSize), "insertGroupSize must be a power of two");
-    static_assert(detail::powerOfTwo(queryGroupSize), "queryGroupSize must be a power of two");
+    static_assert(
+        cuda::std::has_single_bit(insertGroupSize),
+        "insertGroupSize must be a power of two"
+    );
+    static_assert(
+        cuda::std::has_single_bit(queryGroupSize),
+        "queryGroupSize must be a power of two"
+    );
     static_assert(
         hashCount >= blockWordCount,
         "Sectorized layout requires hashCount >= blockWordCount"
@@ -92,17 +115,15 @@ struct PackedKmerInput;
 template <typename Config>
 __global__ void containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
-    uint64_t numShards,
-    const typename Filter<Config>::Shard* shards,
-    uint8_t* output
+    device_span<const typename Filter<Config>::Shard> shards,
+    device_span<uint8_t> output
 );
 
 template <typename Config>
 __global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersKernel(
     PackedKmerInput<Config> input,
-    uint64_t numShards,
-    const typename Filter<Config>::Shard* shards,
-    uint8_t* output
+    device_span<const typename Filter<Config>::Shard> shards,
+    device_span<uint8_t> output
 );
 
 template <typename Config>
@@ -116,15 +137,13 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
 template <typename Config>
 __global__ void insertSequenceKmersKernel(
     SequenceKmerInput<Config> input,
-    uint64_t numShards,
-    typename Filter<Config>::Shard* shards
+    device_span<typename Filter<Config>::Shard> shards
 );
 
 template <typename Config>
 __global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKernel(
     PackedKmerInput<Config> input,
-    uint64_t numShards,
-    typename Filter<Config>::Shard* shards
+    device_span<typename Filter<Config>::Shard> shards
 );
 
 inline constexpr uint64_t kInvalidHash = std::numeric_limits<uint64_t>::max();
@@ -215,16 +234,7 @@ __host__ __device__ __forceinline__ void forEachHashIndex(Fn&& fn) {
     );
 }
 
-constexpr int log2Pow2(uint64_t value) {
-    int exponent = 0;
-    while (value > 1) {
-        value >>= 1;
-        ++exponent;
-    }
-    return exponent;
-}
-
-__host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
+constexpr __host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
     switch (base) {
         case 'A':
         case 'a':
@@ -296,23 +306,6 @@ __device__ __forceinline__ void atomicOrWord(WordType* ptr, WordType value) {
     }
 }
 
-template <typename WordType>
-[[nodiscard]] __host__ __device__ __forceinline__ uint64_t popcountWord(WordType value) {
-#if defined(__CUDA_ARCH__)
-    if constexpr (std::is_same_v<WordType, uint64_t>) {
-        return static_cast<uint64_t>(__popcll(static_cast<unsigned long long>(value)));
-    } else {
-        return static_cast<uint64_t>(__popc(static_cast<unsigned int>(value)));
-    }
-#else
-    if constexpr (std::is_same_v<WordType, uint64_t>) {
-        return static_cast<uint64_t>(__builtin_popcountll(static_cast<unsigned long long>(value)));
-    } else {
-        return static_cast<uint64_t>(__builtin_popcount(static_cast<unsigned int>(value)));
-    }
-#endif
-}
-
 }  // namespace detail
 
 template <typename Config>
@@ -323,12 +316,14 @@ class Filter {
     struct alignas(32) Shard {
         static constexpr uint64_t wordCount = Config::blockWordCount;
         static constexpr uint64_t wordBits = Config::wordBits;
-        static constexpr int wordBitsLog2 = detail::log2Pow2(wordBits);
+        static constexpr int wordBitsLog2 = cuda::std::bit_width(wordBits) - 1;
 
         WordType words[wordCount];
 
         template <uint64_t HashIndex>
-        [[nodiscard]] __host__ __device__ static uint64_t sectorizedBitAddress(uint64_t baseHash) {
+        [[nodiscard]] constexpr __host__ __device__ static uint64_t sectorizedBitAddress(
+            uint64_t baseHash
+        ) {
             static_assert(HashIndex < Config::hashCount, "Hash index out of range");
             const uint64_t mixed = baseHash * detail::multiplicativeSaltLiteral<HashIndex>();
             return static_cast<uint64_t>(mixed >> (64 - wordBitsLog2));
@@ -400,237 +395,202 @@ class Filter {
 
     explicit Filter(uint64_t requestedFilterBits)
         : numShards_(
-              detail::nextPowerOfTwo(
-                  std::max<uint64_t>(1, SDIV(requestedFilterBits, Config::filterBlockBits))
+              cuda::std::bit_ceil(
+                  std::max<uint64_t>(1, detail::divUp(requestedFilterBits, Config::filterBlockBits))
               )
           ),
-          filterBits_(numShards_ * Config::filterBlockBits) {
-        CUDA_CALL(cudaMalloc(&d_shards_, sizeBytes()));
+          filterBits_(numShards_ * Config::filterBlockBits),
+          d_shards_(numShards_) {
         clear();
     }
 
     Filter(const Filter&) = delete;
     Filter& operator=(const Filter&) = delete;
-
-    ~Filter() {
-        if (d_resultBuffer_ != nullptr) {
-            cudaFree(d_resultBuffer_);
-        }
-        if (d_packedKmers_ != nullptr) {
-            cudaFree(d_packedKmers_);
-        }
-        if (d_sequence_ != nullptr) {
-            cudaFree(d_sequence_);
-        }
-        if (d_shards_ != nullptr) {
-            cudaFree(d_shards_);
-        }
-    }
+    Filter(Filter&&) = default;
+    Filter& operator=(Filter&&) = default;
+    ~Filter() = default;
 
     [[nodiscard]] uint64_t
-    insertSequence(const char* sequence, uint64_t length, cudaStream_t stream = {}) {
-        if (sequence == nullptr || length < Config::k) {
+    insertSequence(std::string_view sequence, cuda::stream_ref stream = cudaStream_t{}) {
+        if (sequence.size() < Config::k) {
             return 0;
         }
 
-        const uint64_t totalKmers = length - Config::k + 1;
-        stageSequence(sequence, length, stream);
-        launchInsertSequence(d_sequence_, length, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
+        const uint64_t totalKmers = sequence.size() - Config::k + 1;
+        stageSequence({sequence.data(), sequence.size()}, stream);
+        launchInsertSequence(
+            device_span<const char>{thrust::raw_pointer_cast(d_sequence_.data()), sequence.size()},
+            stream
+        );
+        CUDA_CALL(cudaStreamSynchronize(stream.get()));
         return totalKmers;
     }
 
-    [[nodiscard]] uint64_t
-    insertSequenceDevice(const char* d_sequence, uint64_t length, cudaStream_t stream = {}) {
-        if (d_sequence == nullptr || length < Config::k) {
+    [[nodiscard]] uint64_t insertSequenceDevice(
+        device_span<const char> d_sequence,
+        cuda::stream_ref stream = cudaStream_t{}
+    ) {
+        if (d_sequence.size() < Config::k) {
             return 0;
         }
 
-        const uint64_t totalKmers = length - Config::k + 1;
-        launchInsertSequence(d_sequence, length, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
+        const uint64_t totalKmers = d_sequence.size() - Config::k + 1;
+        launchInsertSequence(d_sequence, stream);
         return totalKmers;
     }
 
-    [[nodiscard]] uint64_t insertSequence(std::string_view sequence, cudaStream_t stream = {}) {
-        return insertSequence(sequence.data(), sequence.size(), stream);
-    }
-
-    [[nodiscard]] uint64_t
-    insertPackedKmers(const uint64_t* kmers, uint64_t count, cudaStream_t stream = {}) {
-        if (kmers == nullptr || count == 0) {
+    [[nodiscard]] uint64_t insertPackedKmers(
+        cuda::std::span<const uint64_t> kmers,
+        cuda::stream_ref stream = cudaStream_t{}
+    ) {
+        if (kmers.empty()) {
             return 0;
         }
 
-        stagePackedKmers(kmers, count, stream);
-        launchInsertPacked(d_packedKmers_, count, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
-        return count;
+        stagePackedKmers(kmers, stream);
+        launchInsertPacked(
+            device_span<const uint64_t>{
+                thrust::raw_pointer_cast(d_packedKmers_.data()), kmers.size()
+            },
+            stream
+        );
+        CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        return kmers.size();
     }
 
-    [[nodiscard]] uint64_t
-    insertPackedKmersDevice(const uint64_t* d_kmers, uint64_t count, cudaStream_t stream = {}) {
-        if (d_kmers == nullptr || count == 0) {
+    [[nodiscard]] uint64_t insertPackedKmersDevice(
+        device_span<const uint64_t> d_kmers,
+        cuda::stream_ref stream = cudaStream_t{}
+    ) {
+        if (d_kmers.empty()) {
             return 0;
         }
 
-        launchInsertPacked(d_kmers, count, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
-        return count;
+        launchInsertPacked(d_kmers, stream);
+        return d_kmers.size();
     }
 
-    [[nodiscard]] uint64_t
-    insertPackedKmers(const std::vector<uint64_t>& kmers, cudaStream_t stream = {}) {
-        return insertPackedKmers(kmers.data(), kmers.size(), stream);
-    }
-
-    [[nodiscard]] FastxInsertReport insertFastx(std::istream& input, cudaStream_t stream = {}) {
+    [[nodiscard]] FastxInsertReport
+    insertFastx(std::istream& input, cuda::stream_ref stream = cudaStream_t{}) {
         return insertFastxStream(input, "<stream>", stream);
     }
 
     [[nodiscard]] FastxInsertReport
-    insertFastxFile(std::string_view path, cudaStream_t stream = {}) {
+    insertFastxFile(std::string_view path, cuda::stream_ref stream = cudaStream_t{}) {
         auto input = detail::openFastxFile(path);
         return insertFastxStream(input, path, stream);
     }
 
-    void containsSequence(
-        const char* sequence,
-        uint64_t length,
-        uint8_t* d_output,
-        cudaStream_t stream = {}
-    ) const {
-        if (d_output == nullptr || sequence == nullptr || length < Config::k) {
-            return;
-        }
-
-        stageSequence(sequence, length, stream);
-        launchContainsSequence(d_sequence_, length, d_output, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
-    }
-
     void containsSequenceDevice(
-        const char* d_sequence,
-        uint64_t length,
-        uint8_t* d_output,
-        cudaStream_t stream = {}
+        device_span<const char> d_sequence,
+        device_span<uint8_t> d_output,
+        cuda::stream_ref stream = cudaStream_t{}
     ) const {
-        if (d_output == nullptr || d_sequence == nullptr || length < Config::k) {
+        if (d_sequence.size() < Config::k) {
             return;
         }
 
-        launchContainsSequence(d_sequence, length, d_output, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
+        launchContainsSequence(d_sequence, d_output, stream);
     }
 
     [[nodiscard]] std::vector<uint8_t>
-    containsSequence(const char* sequence, uint64_t length, cudaStream_t stream = {}) const {
-        if (sequence == nullptr || length < Config::k) {
+    containsSequence(std::string_view sequence, cuda::stream_ref stream = cudaStream_t{}) const {
+        if (sequence.size() < Config::k) {
             return {};
         }
 
-        std::vector<uint8_t> output(length - Config::k + 1);
+        std::vector<uint8_t> output(sequence.size() - Config::k + 1);
 
-        stageSequence(sequence, length, stream);
+        stageSequence({sequence.data(), sequence.size()}, stream);
         ensureResultCapacity(output.size());
-        launchContainsSequence(d_sequence_, length, d_resultBuffer_, stream);
+        launchContainsSequence(
+            device_span<const char>{thrust::raw_pointer_cast(d_sequence_.data()), sequence.size()},
+            device_span<uint8_t>{thrust::raw_pointer_cast(d_resultBuffer_.data()), output.size()},
+            stream
+        );
         CUDA_CALL(cudaMemcpyAsync(
             output.data(),
-            d_resultBuffer_,
+            thrust::raw_pointer_cast(d_resultBuffer_.data()),
             output.size() * sizeof(uint8_t),
             cudaMemcpyDeviceToHost,
-            stream
+            stream.get()
         ));
 
-        CUDA_CALL(cudaStreamSynchronize(stream));
+        CUDA_CALL(cudaStreamSynchronize(stream.get()));
         return output;
-    }
-
-    [[nodiscard]] std::vector<uint8_t>
-    containsSequence(std::string_view sequence, cudaStream_t stream = {}) const {
-        return containsSequence(sequence.data(), sequence.size(), stream);
-    }
-
-    void containsPackedKmers(
-        const uint64_t* kmers,
-        uint64_t count,
-        uint8_t* d_output,
-        cudaStream_t stream = {}
-    ) const {
-        if (d_output == nullptr || kmers == nullptr || count == 0) {
-            return;
-        }
-
-        stagePackedKmers(kmers, count, stream);
-        launchContainsPacked(d_packedKmers_, count, d_output, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
     }
 
     void containsPackedKmersDevice(
-        const uint64_t* d_kmers,
-        uint64_t count,
-        uint8_t* d_output,
-        cudaStream_t stream = {}
+        device_span<const uint64_t> d_kmers,
+        device_span<uint8_t> d_output,
+        cuda::stream_ref stream = cudaStream_t{}
     ) const {
-        if (d_output == nullptr || d_kmers == nullptr || count == 0) {
+        if (d_kmers.empty()) {
             return;
         }
 
-        launchContainsPacked(d_kmers, count, d_output, stream);
-        CUDA_CALL(cudaStreamSynchronize(stream));
+        launchContainsPacked(d_kmers, d_output, stream);
     }
 
-    [[nodiscard]] std::vector<uint8_t>
-    containsPackedKmers(const uint64_t* kmers, uint64_t count, cudaStream_t stream = {}) const {
-        if (kmers == nullptr || count == 0) {
+    [[nodiscard]] std::vector<uint8_t> containsPackedKmers(
+        cuda::std::span<const uint64_t> kmers,
+        cuda::stream_ref stream = cudaStream_t{}
+    ) const {
+        if (kmers.empty()) {
             return {};
         }
 
-        std::vector<uint8_t> output(count);
-        stagePackedKmers(kmers, count, stream);
-        ensureResultCapacity(count);
-        launchContainsPacked(d_packedKmers_, count, d_resultBuffer_, stream);
+        std::vector<uint8_t> output(kmers.size());
+        stagePackedKmers(kmers, stream);
+        ensureResultCapacity(kmers.size());
+        launchContainsPacked(
+            device_span<const uint64_t>{
+                thrust::raw_pointer_cast(d_packedKmers_.data()), kmers.size()
+            },
+            device_span<uint8_t>{thrust::raw_pointer_cast(d_resultBuffer_.data()), kmers.size()},
+            stream
+        );
         CUDA_CALL(cudaMemcpyAsync(
             output.data(),
-            d_resultBuffer_,
+            thrust::raw_pointer_cast(d_resultBuffer_.data()),
             output.size() * sizeof(uint8_t),
             cudaMemcpyDeviceToHost,
-            stream
+            stream.get()
         ));
-        CUDA_CALL(cudaStreamSynchronize(stream));
+        CUDA_CALL(cudaStreamSynchronize(stream.get()));
         return output;
     }
 
-    [[nodiscard]] std::vector<uint8_t>
-    containsPackedKmers(const std::vector<uint64_t>& kmers, cudaStream_t stream = {}) const {
-        return containsPackedKmers(kmers.data(), kmers.size(), stream);
-    }
-
-    [[nodiscard]] FastxQueryReport queryFastx(std::istream& input, cudaStream_t stream = {}) const {
+    [[nodiscard]] FastxQueryReport
+    queryFastx(std::istream& input, cuda::stream_ref stream = cudaStream_t{}) const {
         return queryFastxStream(input, "<stream>", stream);
     }
 
     [[nodiscard]] FastxQueryReport
-    queryFastxFile(std::string_view path, cudaStream_t stream = {}) const {
+    queryFastxFile(std::string_view path, cuda::stream_ref stream = cudaStream_t{}) const {
         auto input = detail::openFastxFile(path);
         return queryFastxStream(input, path, stream);
     }
 
-    void clear(cudaStream_t stream = {}) {
-        CUDA_CALL(cudaMemsetAsync(d_shards_, 0, sizeBytes(), stream));
-        CUDA_CALL(cudaStreamSynchronize(stream));
+    void clear(cuda::stream_ref stream = cudaStream_t{}) {
+        CUDA_CALL(cudaMemsetAsync(
+            thrust::raw_pointer_cast(d_shards_.data()), 0, sizeBytes(), stream.get()
+        ));
+        CUDA_CALL(cudaStreamSynchronize(stream.get()));
     }
 
     [[nodiscard]] float loadFactor() const {
-        std::vector<Shard> hostShards(shardCount());
-        CUDA_CALL(cudaMemcpy(hostShards.data(), d_shards_, sizeBytes(), cudaMemcpyDeviceToHost));
-
-        uint64_t setBits = 0;
-        for (const Shard& shard : hostShards) {
-            for (WordType word : shard.words) {
-                setBits += detail::popcountWord(word);
-            }
-        }
+        const auto* wordsBegin =
+            reinterpret_cast<const WordType*>(thrust::raw_pointer_cast(d_shards_.data()));
+        const uint64_t totalWords = numShards_ * Config::blockWordCount;
+        const uint64_t setBits = thrust::transform_reduce(
+            thrust::device,
+            wordsBegin,
+            wordsBegin + totalWords,
+            [] __device__(WordType w) -> uint64_t { return cuda::std::popcount(w); },
+            uint64_t{0},
+            thrust::plus<uint64_t>{}
+        );
         return static_cast<float>(setBits) / static_cast<float>(filterBits_);
     }
 
@@ -647,16 +607,13 @@ class Filter {
     }
 
    private:
-    Shard* d_shards_{};
-    mutable char* d_sequence_{};
-    mutable uint64_t* d_packedKmers_{};
-    mutable uint8_t* d_resultBuffer_{};
-    mutable uint64_t sequenceCapacityBases_{};
-    mutable uint64_t packedKmerCapacity_{};
-    mutable uint64_t resultCapacityKmers_{};
-
     uint64_t numShards_{};
     uint64_t filterBits_{};
+
+    thrust::device_vector<Shard> d_shards_;
+    mutable thrust::device_vector<char> d_sequence_;
+    mutable thrust::device_vector<uint64_t> d_packedKmers_;
+    mutable thrust::device_vector<uint8_t> d_resultBuffer_;
 
     [[nodiscard]] uint64_t shardCount() const {
         return numShards_;
@@ -667,7 +624,7 @@ class Filter {
     }
 
     [[nodiscard]] FastxInsertReport
-    insertFastxStream(std::istream& input, std::string_view sourceName, cudaStream_t stream) {
+    insertFastxStream(std::istream& input, std::string_view sourceName, cuda::stream_ref stream) {
         detail::FastxReader reader(input, sourceName);
         detail::FastxRecord record;
         FastxInsertReport report;
@@ -680,8 +637,11 @@ class Filter {
         return report;
     }
 
-    [[nodiscard]] FastxQueryReport
-    queryFastxStream(std::istream& input, std::string_view sourceName, cudaStream_t stream) const {
+    [[nodiscard]] FastxQueryReport queryFastxStream(
+        std::istream& input,
+        std::string_view sourceName,
+        cuda::stream_ref stream
+    ) const {
         detail::FastxReader reader(input, sourceName);
         detail::FastxRecord record;
         FastxQueryReport report;
@@ -698,108 +658,105 @@ class Filter {
     }
 
     void ensureSequenceCapacity(uint64_t bases) const {
-        if (bases <= sequenceCapacityBases_) {
-            return;
+        if (bases > d_sequence_.size()) {
+            d_sequence_.resize(bases);
         }
-        if (d_sequence_ != nullptr) {
-            CUDA_CALL(cudaFree(d_sequence_));
-        }
-        CUDA_CALL(cudaMalloc(&d_sequence_, bases * sizeof(char)));
-        sequenceCapacityBases_ = bases;
     }
 
     void ensureResultCapacity(uint64_t kmers) const {
-        if (kmers <= resultCapacityKmers_) {
-            return;
+        if (kmers > d_resultBuffer_.size()) {
+            d_resultBuffer_.resize(kmers);
         }
-        if (d_resultBuffer_ != nullptr) {
-            CUDA_CALL(cudaFree(d_resultBuffer_));
-        }
-        CUDA_CALL(cudaMalloc(&d_resultBuffer_, kmers * sizeof(uint8_t)));
-        resultCapacityKmers_ = kmers;
     }
 
     void ensurePackedKmerCapacity(uint64_t kmers) const {
-        if (kmers <= packedKmerCapacity_) {
-            return;
+        if (kmers > d_packedKmers_.size()) {
+            d_packedKmers_.resize(kmers);
         }
-        if (d_packedKmers_ != nullptr) {
-            CUDA_CALL(cudaFree(d_packedKmers_));
-        }
-        CUDA_CALL(cudaMalloc(&d_packedKmers_, kmers * sizeof(uint64_t)));
-        packedKmerCapacity_ = kmers;
     }
 
-    void stageSequence(const char* sequence, uint64_t length, cudaStream_t stream) const {
-        ensureSequenceCapacity(length);
+    void stageSequence(cuda::std::span<const char> sequence, cuda::stream_ref stream) const {
+        ensureSequenceCapacity(sequence.size());
         CUDA_CALL(cudaMemcpyAsync(
-            d_sequence_, sequence, length * sizeof(char), cudaMemcpyHostToDevice, stream
+            thrust::raw_pointer_cast(d_sequence_.data()),
+            sequence.data(),
+            sequence.size_bytes(),
+            cudaMemcpyHostToDevice,
+            stream.get()
         ));
     }
 
-    void stagePackedKmers(const uint64_t* kmers, uint64_t count, cudaStream_t stream) const {
-        ensurePackedKmerCapacity(count);
+    void stagePackedKmers(cuda::std::span<const uint64_t> kmers, cuda::stream_ref stream) const {
+        ensurePackedKmerCapacity(kmers.size());
         CUDA_CALL(cudaMemcpyAsync(
-            d_packedKmers_, kmers, count * sizeof(uint64_t), cudaMemcpyHostToDevice, stream
+            thrust::raw_pointer_cast(d_packedKmers_.data()),
+            kmers.data(),
+            kmers.size_bytes(),
+            cudaMemcpyHostToDevice,
+            stream.get()
         ));
     }
 
-    void
-    launchInsertSequence(const char* d_sequence, uint64_t sequenceLength, cudaStream_t stream) {
-        if (sequenceLength < Config::k) {
+    void launchInsertSequence(device_span<const char> d_sequence, cuda::stream_ref stream) {
+        if (d_sequence.size() < Config::k) {
             return;
         }
-        const uint64_t numKmers = sequenceLength - Config::k + 1;
-        const uint64_t gridSize = SDIV(numKmers, Config::cudaBlockSize);
+        const uint64_t numKmers = d_sequence.size() - Config::k + 1;
+        const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize);
 
-        detail::insertSequenceKmersKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-            detail::SequenceKmerInput<Config>{d_sequence, sequenceLength}, numShards_, d_shards_
-        );
+        detail::insertSequenceKmersKernel<Config>
+            <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
+                detail::SequenceKmerInput<Config>{d_sequence},
+                device_span<Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_}
+            );
         CUDA_CALL(cudaGetLastError());
     }
 
-    void launchInsertPacked(const uint64_t* d_kmers, uint64_t count, cudaStream_t stream) {
-        if (count == 0) {
+    void launchInsertPacked(device_span<const uint64_t> d_kmers, cuda::stream_ref stream) {
+        if (d_kmers.empty()) {
             return;
         }
-        const uint64_t gridSize = SDIV(count, Config::cudaBlockSize);
+        const uint64_t gridSize = detail::divUp(d_kmers.size(), Config::cudaBlockSize);
 
-        detail::insertPackedKmersKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-            detail::PackedKmerInput<Config>{d_kmers, count}, numShards_, d_shards_
-        );
+        detail::insertPackedKmersKernel<Config>
+            <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
+                detail::PackedKmerInput<Config>{d_kmers},
+                device_span<Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_}
+            );
         CUDA_CALL(cudaGetLastError());
     }
 
     void launchContainsSequence(
-        const char* d_sequence,
-        uint64_t sequenceLength,
-        uint8_t* d_output,
-        cudaStream_t stream
+        device_span<const char> d_sequence,
+        device_span<uint8_t> d_output,
+        cuda::stream_ref stream
     ) const {
-        const uint64_t numKmers = sequenceLength - Config::k + 1;
-        CUDA_CALL(cudaMemsetAsync(d_output, 0, numKmers * sizeof(uint8_t), stream));
-        const uint64_t gridSize = SDIV(numKmers, Config::cudaBlockSize);
+        const uint64_t numKmers = d_sequence.size() - Config::k + 1;
+        CUDA_CALL(cudaMemsetAsync(d_output.data(), 0, d_output.size_bytes(), stream.get()));
+        const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize);
 
-        detail::containsSequenceKmersKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-            detail::SequenceKmerInput<Config>{d_sequence, sequenceLength},
-            numShards_,
-            d_shards_,
-            d_output
-        );
+        detail::containsSequenceKmersKernel<Config>
+            <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
+                detail::SequenceKmerInput<Config>{d_sequence},
+                device_span<const Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_},
+                d_output
+            );
         CUDA_CALL(cudaGetLastError());
     }
 
     void launchContainsPacked(
-        const uint64_t* d_kmers,
-        uint64_t count,
-        uint8_t* d_output,
-        cudaStream_t stream
+        device_span<const uint64_t> d_kmers,
+        device_span<uint8_t> d_output,
+        cuda::stream_ref stream
     ) const {
-        const uint64_t gridSize = SDIV(count, Config::cudaBlockSize);
+        const uint64_t gridSize = detail::divUp(d_kmers.size(), Config::cudaBlockSize);
 
-        detail::containsPackedKmersKernel<Config><<<gridSize, Config::cudaBlockSize, 0, stream>>>(
-            detail::PackedKmerInput<Config>{d_kmers, count}, numShards_, d_shards_, d_output
-        );
+        detail::containsPackedKmersKernel<Config>
+            <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
+                detail::PackedKmerInput<Config>{d_kmers},
+                device_span<const Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_},
+                d_output
+            );
         CUDA_CALL(cudaGetLastError());
     }
 };
@@ -808,25 +765,23 @@ namespace detail {
 
 template <typename Config>
 struct SequenceKmerInput {
-    const char* sequence;
-    uint64_t sequenceLength;
+    device_span<const char> sequence;
 
-    [[nodiscard]] __host__ __device__ uint64_t kmerCount() const {
-        return sequenceLength < Config::k ? 0 : (sequenceLength - Config::k + 1);
+    [[nodiscard]] constexpr __host__ __device__ uint64_t kmerCount() const {
+        return sequence.size() < Config::k ? 0 : (sequence.size() - Config::k + 1);
     }
 
-    [[nodiscard]] __host__ __device__ uint64_t smerCount() const {
-        return sequenceLength < Config::s ? 0 : (sequenceLength - Config::s + 1);
+    [[nodiscard]] constexpr __host__ __device__ uint64_t smerCount() const {
+        return sequence.size() < Config::s ? 0 : (sequence.size() - Config::s + 1);
     }
 };
 
 template <typename Config>
 struct PackedKmerInput {
-    const uint64_t* kmers;
-    uint64_t count;
+    device_span<const uint64_t> kmers;
 
-    [[nodiscard]] __host__ __device__ uint64_t kmerCount() const {
-        return count;
+    [[nodiscard]] constexpr __host__ __device__ uint64_t kmerCount() const {
+        return kmers.size();
     }
 };
 
@@ -900,9 +855,8 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
 template <typename Config>
 __global__ void containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
-    uint64_t numShards,
-    const typename Filter<Config>::Shard* shards,
-    uint8_t* output
+    device_span<const typename Filter<Config>::Shard> shards,
+    device_span<uint8_t> output
 ) {
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
 
@@ -919,8 +873,9 @@ __global__ void containsSequenceKmersKernel(
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     const bool inRange = localKmerIndex < blockKmers;
 
-    const bool blockAllValid =
-        prepareSequenceHashTiles<Config>(input.sequence, blockStartKmer, blockKmers, sequenceTile);
+    const bool blockAllValid = prepareSequenceHashTiles<Config>(
+        input.sequence.data(), blockStartKmer, blockKmers, sequenceTile
+    );
 
     if (!inRange) {
         return;
@@ -956,7 +911,7 @@ __global__ void containsSequenceKmersKernel(
     }
 
     typename Config::WordType w[4] = {};
-    loadShardWords4<Config>(shards, minimizerHash & (numShards - 1), w);
+    loadShardWords4<Config>(shards.data(), minimizerHash & (shards.size() - 1), w);
 
     uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex);
     bool present = true;
@@ -982,12 +937,11 @@ __global__ void containsSequenceKmersKernel(
 template <typename Config>
 __global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersKernel(
     PackedKmerInput<Config> input,
-    uint64_t numShards,
-    const typename Filter<Config>::Shard* shards,
-    uint8_t* output
+    device_span<const typename Filter<Config>::Shard> shards,
+    device_span<uint8_t> output
 ) {
     const uint64_t kmerIndex = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (kmerIndex >= input.count) {
+    if (kmerIndex >= input.kmers.size()) {
         return;
     }
 
@@ -995,7 +949,7 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersK
     const uint64_t minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
 
     typename Config::WordType w[4] = {};
-    loadShardWords4<Config>(shards, minimizerHash & (numShards - 1), w);
+    loadShardWords4<Config>(shards.data(), minimizerHash & (shards.size() - 1), w);
 
     const bool present = sectorizedContainsPackedKmer<Config>(packedKmer, w);
     output[kmerIndex] = static_cast<uint8_t>(present);
@@ -1004,8 +958,7 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersK
 template <typename Config>
 __global__ void insertSequenceKmersKernel(
     SequenceKmerInput<Config> input,
-    uint64_t numShards,
-    typename Filter<Config>::Shard* shards
+    device_span<typename Filter<Config>::Shard> shards
 ) {
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
 
@@ -1022,8 +975,9 @@ __global__ void insertSequenceKmersKernel(
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     const bool inRange = localKmerIndex < blockKmers;
 
-    const bool blockAllValid =
-        prepareSequenceHashTiles<Config>(input.sequence, blockStartKmer, blockKmers, sequenceTile);
+    const bool blockAllValid = prepareSequenceHashTiles<Config>(
+        input.sequence.data(), blockStartKmer, blockKmers, sequenceTile
+    );
 
     if (!inRange) {
         return;
@@ -1074,7 +1028,7 @@ __global__ void insertSequenceKmersKernel(
         );
     }
 
-    auto& shard = shards[minimizerHash & (numShards - 1)];
+    auto& shard = shards[minimizerHash & (shards.size() - 1)];
     if (wordMask0 != 0) {
         atomicOrWord(&shard.words[0], wordMask0);
     }
@@ -1092,8 +1046,7 @@ __global__ void insertSequenceKmersKernel(
 template <typename Config>
 __global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKernel(
     PackedKmerInput<Config> input,
-    uint64_t numShards,
-    typename Filter<Config>::Shard* shards
+    device_span<typename Filter<Config>::Shard> shards
 ) {
     using WordType = typename Config::WordType;
 
@@ -1101,7 +1054,7 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKer
     auto tile = cg::tiled_partition<Config::insertGroupSize>(block);
 
     const uint64_t kmerIndex = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const auto inRange = static_cast<uint32_t>(kmerIndex < input.count);
+    const auto inRange = static_cast<uint32_t>(kmerIndex < input.kmers.size());
 
     uint64_t packedKmer = 0;
     uint64_t minimizerHash = 0;
@@ -1126,7 +1079,7 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKer
         }
 
         if (srcActive && laneMask != 0) {
-            atomicOrWord(&shards[srcMinHash & (numShards - 1)].words[lane], laneMask);
+            atomicOrWord(&shards[srcMinHash & (shards.size() - 1)].words[lane], laneMask);
         }
     }
 }

@@ -7,6 +7,11 @@
 #include <utility>
 #include <vector>
 
+#include <thrust/copy.h>
+#include <thrust/device_vector.h>
+#include <cuda/std/span>
+
+#include <bloom/device_span.cuh>
 #include <bloom/PackedKmerBinary.hpp>
 
 #include "test_support.hpp"
@@ -79,21 +84,21 @@ TEST_F(BloomFilterTest, SequenceQueryMatchesHostAndDeviceResults) {
     ASSERT_EQ(hostHits.size(), sequence.size() - TestConfig::k + 1);
     EXPECT_TRUE(allOnes(hostHits));
 
-    uint8_t* d_output = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_output, hostHits.size() * sizeof(uint8_t)), cudaSuccess);
+    thrust::device_vector<char> d_sequence(sequence.begin(), sequence.end());
+    thrust::device_vector<uint8_t> d_output(hostHits.size());
 
-    filter.containsSequence(sequence.data(), sequence.size(), d_output);
+    filter.containsSequenceDevice(
+        bloom::device_span<const char>{
+            thrust::raw_pointer_cast(d_sequence.data()), d_sequence.size()
+        },
+        bloom::device_span<uint8_t>{thrust::raw_pointer_cast(d_output.data()), d_output.size()}
+    );
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<uint8_t> deviceHits(hostHits.size());
-    ASSERT_EQ(
-        cudaMemcpy(
-            deviceHits.data(), d_output, hostHits.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost
-        ),
-        cudaSuccess
-    );
+    thrust::copy(d_output.begin(), d_output.end(), deviceHits.begin());
 
     EXPECT_EQ(deviceHits, hostHits);
-    ASSERT_EQ(cudaFree(d_output), cudaSuccess);
 }
 
 TEST_F(BloomFilterTest, PackedInsertIsIdempotent) {
@@ -117,7 +122,7 @@ TEST_F(BloomFilterTest, PackedInsertTailCountNotDivisibleByFourSupportsQueries) 
 
     ASSERT_FALSE(kmers.empty());
     ASSERT_NE(kmers.size() % TestConfig::blockWordCount, 0ULL);
-    ASSERT_EQ(filter.insertPackedKmers(kmers.data(), kmers.size()), kmers.size());
+    ASSERT_EQ(filter.insertPackedKmers(kmers), kmers.size());
 
     const auto packedHits = filter.containsPackedKmers(kmers);
     EXPECT_TRUE(allOnes(packedHits));
@@ -130,7 +135,7 @@ TEST_F(BloomFilterTest, PackedTailQueryMatchesHostAndDeviceResults) {
     const auto kmers = packValidKmers<TestConfig::k>(sequence);
     ASSERT_NE(kmers.size() % TestConfig::blockWordCount, 0ULL);
 
-    ASSERT_EQ(filter.insertPackedKmers(kmers.data(), kmers.size()), kmers.size());
+    ASSERT_EQ(filter.insertPackedKmers(kmers), kmers.size());
 
     std::vector<uint64_t> query = kmers;
     query.push_back(kmers.front());
@@ -141,22 +146,22 @@ TEST_F(BloomFilterTest, PackedTailQueryMatchesHostAndDeviceResults) {
     ASSERT_EQ(hostHits.size(), query.size());
     EXPECT_TRUE(allOnes(hostHits));
 
-    uint8_t* d_output = nullptr;
-    ASSERT_EQ(cudaMalloc(&d_output, hostHits.size() * sizeof(uint8_t)), cudaSuccess);
+    thrust::device_vector<uint64_t> d_query(query.begin(), query.end());
+    thrust::device_vector<uint8_t> d_output(hostHits.size());
 
-    filter.containsPackedKmers(query.data(), query.size(), d_output);
+    filter.containsPackedKmersDevice(
+        bloom::device_span<const uint64_t>{
+            thrust::raw_pointer_cast(d_query.data()), d_query.size()
+        },
+        bloom::device_span<uint8_t>{thrust::raw_pointer_cast(d_output.data()), d_output.size()}
+    );
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     std::vector<uint8_t> deviceHits(hostHits.size());
-    ASSERT_EQ(
-        cudaMemcpy(
-            deviceHits.data(), d_output, hostHits.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost
-        ),
-        cudaSuccess
-    );
+    thrust::copy(d_output.begin(), d_output.end(), deviceHits.begin());
 
     EXPECT_EQ(deviceHits, hostHits);
     EXPECT_TRUE(allOnes(deviceHits));
-    ASSERT_EQ(cudaFree(d_output), cudaSuccess);
 }
 
 TEST_F(BloomFilterTest, PackedBinaryStoresKAndLoadsKmers) {

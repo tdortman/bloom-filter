@@ -2,156 +2,46 @@
 
 #include <cuda_runtime.h>
 
+#include <cuda/std/bit>
+#include <cuda/std/concepts>
+
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <iostream>
+#include <stdexcept>
+#include <string>
+
+namespace bloom {
+
+/**
+ * @brief Exception thrown on CUDA runtime errors.
+ */
+class CudaError : public std::runtime_error {
+   public:
+    CudaError(cudaError_t code, const char* file, int line)
+        : std::runtime_error(
+              std::string(file) + ":" + std::to_string(line) + " " + cudaGetErrorString(code)
+          ),
+          code_(code) {
+    }
+
+    [[nodiscard]] cudaError_t code() const noexcept {
+        return code_;
+    }
+
+   private:
+    cudaError_t code_;
+};
+
+}  // namespace bloom
 
 namespace bloom::detail {
 
 /**
- * @brief Checks if a number is a power of two.
- * @param n Number to check.
- * @return true if n is a power of two, false otherwise.
+ * @brief Integer ceiling division.
  */
-constexpr bool powerOfTwo(uint64_t n) {
-    return n != 0 && (n & (n - 1)) == 0;
-}
-
-/**
- * @brief Calculates the global thread ID in a 1D grid.
- * @return uint32_t Global thread ID.
- */
-__host__ __device__ __forceinline__ uint32_t globalThreadId() {
-    return blockIdx.x * blockDim.x + threadIdx.x;
-}
-
-/**
- * @brief Calculates the next power of two greater than or equal to n.
- * @param n Input number.
- * @return uint64_t Next power of two.
- */
-constexpr uint64_t nextPowerOfTwo(uint64_t n) {
-    if (powerOfTwo(n))
-        return n;
-
-    n--;
-    n |= n >> 1;
-    n |= n >> 2;
-    n |= n >> 4;
-    n |= n >> 8;
-    n |= n >> 16;
-    n |= n >> 32;
-    n++;
-
-    return n;
-}
-
-/**
- * @brief Counts the number of non-zero elements in an array.
- * @tparam T Type of elements.
- * @param data Pointer to the array.
- * @param n Number of elements.
- * @return uint64_t Number of non-zero elements.
- */
-template <typename T>
-uint64_t countOnes(T* data, uint64_t n) {
-    uint64_t count = 0;
-    for (uint64_t i = 0; i < n; ++i) {
-        if (data[i]) {
-            count++;
-        }
-    }
-    return count;
-}
-
-/**
- * @brief Returns a bitmask indicating which slots in a packed word are zero.
- *
- * Uses SWAR (SIMD Within A Register) to check multiple items in parallel.
- * See https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
- *
- * The high bit of each slot that is zero will be set in the result.
- *
- * @tparam TagType The type of the individual items (uint8_t, uint16_t, or uint32_t)
- * @tparam WordType The packed word type (uint32_t or uint64_t)
- * @param v The packed integer
- * @return A bitmask with the high bit of each zero slot set
- */
-template <typename TagType, typename WordType>
-__host__ __device__ __forceinline__ constexpr WordType getZeroMask(WordType v) {
-    static_assert(sizeof(WordType) == 4 || sizeof(WordType) == 8, "WordType must be 32 or 64 bits");
-
-    if constexpr (sizeof(WordType) == 8) {
-        if constexpr (sizeof(TagType) == 1) {
-            return (v - 0x0101010101010101ULL) & ~v & 0x8080808080808080ULL;
-        } else if constexpr (sizeof(TagType) == 2) {
-            return (v - 0x0001000100010001ULL) & ~v & 0x8000800080008000ULL;
-        } else if constexpr (sizeof(TagType) == 4) {
-            return (v - 0x0000000100000001ULL) & ~v & 0x8000000080000000ULL;
-        } else {
-            return 0;
-        }
-    } else {
-        if constexpr (sizeof(TagType) == 1) {
-            return (v - 0x01010101U) & ~v & 0x80808080U;
-        } else if constexpr (sizeof(TagType) == 2) {
-            return (v - 0x00010001U) & ~v & 0x80008000U;
-        } else if constexpr (sizeof(TagType) == 4) {
-            return (v - 0x00000001U) & ~v & 0x80000000U;
-        } else {
-            return 0;
-        }
-    }
-}
-
-/**
- * @brief Checks if a packed word contains a zero slot.
- *
- * @tparam TagType The type of the individual items (uint8_t, uint16_t, or uint32_t)
- * @tparam WordType The packed word type (uint32_t or uint64_t)
- * @param v The packed integer
- * @return true if any of the items in v are zero
- */
-template <typename TagType, typename WordType>
-__host__ __device__ __forceinline__ constexpr bool hasZero(WordType v) {
-    return getZeroMask<TagType, WordType>(v) != 0;
-}
-
-/**
- * @brief Replicates a tag value across all slots in a word.
- *
- * @tparam TagType The type of the tag (uint8_t, uint16_t, or uint32_t)
- * @tparam WordType The target word type (uint32_t or uint64_t)
- * @param tag The tag value to replicate
- * @return A word with the tag replicated in every slot
- */
-template <typename TagType, typename WordType>
-__host__ __device__ __forceinline__ constexpr WordType replicateTag(TagType tag) {
-    static_assert(sizeof(WordType) == 4 || sizeof(WordType) == 8, "WordType must be 32 or 64 bits");
-
-    if constexpr (sizeof(WordType) == 8) {
-        if constexpr (sizeof(TagType) == 1) {
-            return static_cast<uint64_t>(tag) * 0x0101010101010101ULL;
-        } else if constexpr (sizeof(TagType) == 2) {
-            return static_cast<uint64_t>(tag) * 0x0001000100010001ULL;
-        } else if constexpr (sizeof(TagType) == 4) {
-            return static_cast<uint64_t>(tag) * 0x0000000100000001ULL;
-        } else {
-            return tag;
-        }
-    } else {
-        if constexpr (sizeof(TagType) == 1) {
-            return static_cast<uint32_t>(tag) * 0x01010101U;
-        } else if constexpr (sizeof(TagType) == 2) {
-            return static_cast<uint32_t>(tag) * 0x00010001U;
-        } else if constexpr (sizeof(TagType) == 4) {
-            return static_cast<uint32_t>(tag);
-        } else {
-            return tag;
-        }
-    }
+template <cuda::std::integral Integer>
+constexpr auto divUp(Integer x, Integer y) {
+    return (x + y - 1) / y;
 }
 
 #if __CUDA_ARCH__ >= 1000
@@ -192,8 +82,13 @@ __device__ __forceinline__ void load256BitGlobalNC(const T* ptr, T* out) {
     }
 }
 
-__device__ __forceinline__ void
-load256BitGlobalNC(const uint64_t* ptr, uint64_t& out0, uint64_t& out1, uint64_t& out2, uint64_t& out3) {
+__device__ __forceinline__ void load256BitGlobalNC(
+    const uint64_t* ptr,
+    uint64_t& out0,
+    uint64_t& out1,
+    uint64_t& out2,
+    uint64_t& out3
+) {
     asm volatile("ld.global.nc.v4.u64 {%0, %1, %2, %3}, [%4];"
                  : "=l"(out0), "=l"(out1), "=l"(out2), "=l"(out3)
                  : "l"(ptr));
@@ -202,22 +97,16 @@ load256BitGlobalNC(const uint64_t* ptr, uint64_t& out0, uint64_t& out1, uint64_t
 #endif
 
 /**
- * @brief Integer division with rounding up (ceiling).
- */
-#define SDIV(x, y) (((x) + (y) - 1) / (y))
-
-/**
  * @brief Macro for checking CUDA errors.
- * Prints error message and exits if an error occurs.
+ * Throws bloom::CudaError on failure.
  */
-#define CUDA_CALL(err)                                                      \
-    do {                                                                    \
-        cudaError_t err_ = (err);                                           \
-        if (err_ == cudaSuccess) [[likely]] {                               \
-            break;                                                          \
-        }                                                                   \
-        printf("%s:%d %s\n", __FILE__, __LINE__, cudaGetErrorString(err_)); \
-        exit(err_);                                                         \
+#define CUDA_CALL(err)                                    \
+    do {                                                  \
+        cudaError_t err_ = (err);                         \
+        if (err_ == cudaSuccess) [[likely]] {             \
+            break;                                        \
+        }                                                 \
+        throw bloom::CudaError(err_, __FILE__, __LINE__); \
     } while (0)
 
 /**
@@ -230,7 +119,7 @@ load256BitGlobalNC(const uint64_t* ptr, uint64_t& out0, uint64_t& out1, uint64_t
  * @return uint64_t The calculated grid size (number of blocks).
  */
 template <typename Kernel>
-constexpr uint64_t maxOccupancyGridSize(int32_t blockSize, Kernel kernel, uint64_t dynamicSMemSize) {
+uint64_t maxOccupancyGridSize(int32_t blockSize, Kernel kernel, uint64_t dynamicSMemSize) {
     int device = 0;
     cudaGetDevice(&device);
 

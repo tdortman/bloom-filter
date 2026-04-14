@@ -6,6 +6,8 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 #include <thrust/transform.h>
+#include <cuda/std/bit>
+#include <cuda/std/span>
 
 #include <algorithm>
 #include <cstdint>
@@ -16,6 +18,7 @@
 #include <vector>
 
 #include <bloom/BloomFilter.cuh>
+#include <bloom/device_span.cuh>
 #include <bloom/helpers.cuh>
 #include <cuco/bloom_filter.cuh>
 
@@ -79,7 +82,7 @@ void gpuEncodePackedKmers(
         return;
     }
     constexpr uint64_t blockSize = 256;
-    const uint64_t gridSize = SDIV(numKmers, blockSize);
+    const uint64_t gridSize = bloom::detail::divUp(numKmers, blockSize);
     encodePackedKmersKernel<K><<<gridSize, blockSize, 0, stream>>>(d_sequence, numKmers, d_output);
 }
 
@@ -191,7 +194,7 @@ BenchmarkData<K>& getBenchmarkData(uint64_t length) {
 
 uint64_t cucoNumBlocks(uint64_t numItems) {
     constexpr auto bitsPerWord = sizeof(typename CucoBloom::word_type) * 8;
-    return SDIV(numItems * kBitsPerItem, CucoBloom::words_per_block * bitsPerWord);
+    return bloom::detail::divUp(numItems * kBitsPerItem, CucoBloom::words_per_block * bitsPerWord);
 }
 
 void setBenchmarkCounters(
@@ -218,7 +221,7 @@ class SuperBloomFixtureBase : public bm::Fixture {
         numKmers = benchData->numKmers;
         numSmers = sequenceLength - Config::s + 1;
 
-        const uint64_t requestedFilterBits = bloom::detail::nextPowerOfTwo(numKmers * kBitsPerItem);
+        const uint64_t requestedFilterBits = cuda::std::bit_ceil(numKmers * kBitsPerItem);
         filter = std::make_unique<bloom::Filter<Config>>(requestedFilterBits);
         filterMemory = filter->filterBits() / 8;
         d_output.resize(numKmers);
@@ -335,13 +338,17 @@ void runSuperBloomInsertBenchmark(Fixture& fixture, bm::State& state) {
         fixture.timer.start();
         if (g_inputMode == InputMode::Packed) {
             benchmark::DoNotOptimize(fixture.filter->insertPackedKmersDevice(
-                thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
-                fixture.numKmers
+                bloom::device_span<const uint64_t>{
+                    thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
+                    fixture.numKmers
+                }
             ));
         } else {
             benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
-                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
-                fixture.sequenceLength
+                bloom::device_span<const char>{
+                    thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                    fixture.sequenceLength
+                }
             ));
         }
         const double elapsed = fixture.timer.elapsed();
@@ -355,13 +362,17 @@ void runSuperBloomQueryBenchmark(Fixture& fixture, bm::State& state) {
     fixture.filter->clear();
     if (g_inputMode == InputMode::Packed) {
         benchmark::DoNotOptimize(fixture.filter->insertPackedKmersDevice(
-            thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
-            fixture.numKmers
+            bloom::device_span<const uint64_t>{
+                thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
+                fixture.numKmers
+            }
         ));
     } else {
         benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
-            thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
-            fixture.sequenceLength
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                fixture.sequenceLength
+            }
         ));
     }
     CUDA_CALL(cudaDeviceSynchronize());
@@ -370,15 +381,23 @@ void runSuperBloomQueryBenchmark(Fixture& fixture, bm::State& state) {
         fixture.timer.start();
         if (g_inputMode == InputMode::Packed) {
             fixture.filter->containsPackedKmersDevice(
-                thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
-                fixture.numKmers,
-                thrust::raw_pointer_cast(fixture.d_output.data())
+                bloom::device_span<const uint64_t>{
+                    thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
+                    fixture.numKmers
+                },
+                bloom::device_span<uint8_t>{
+                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+                }
             );
         } else {
             fixture.filter->containsSequenceDevice(
-                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
-                fixture.sequenceLength,
-                thrust::raw_pointer_cast(fixture.d_output.data())
+                bloom::device_span<const char>{
+                    thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                    fixture.sequenceLength
+                },
+                bloom::device_span<uint8_t>{
+                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+                }
             );
         }
         const double elapsed = fixture.timer.elapsed();
@@ -395,13 +414,17 @@ void runSuperBloomFprBenchmark(Fixture& fixture, bm::State& state) {
     fixture.filter->clear();
     if (g_inputMode == InputMode::Packed) {
         benchmark::DoNotOptimize(fixture.filter->insertPackedKmersDevice(
-            thrust::raw_pointer_cast(fixture.benchData->d_fprInsertPackedKmers.data()),
-            fixture.numKmers
+            bloom::device_span<const uint64_t>{
+                thrust::raw_pointer_cast(fixture.benchData->d_fprInsertPackedKmers.data()),
+                fixture.numKmers
+            }
         ));
     } else {
         benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
-            thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
-            fixture.sequenceLength
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
+                fixture.sequenceLength
+            }
         ));
     }
     CUDA_CALL(cudaDeviceSynchronize());
@@ -411,15 +434,23 @@ void runSuperBloomFprBenchmark(Fixture& fixture, bm::State& state) {
         fixture.timer.start();
         if (g_inputMode == InputMode::Packed) {
             fixture.filter->containsPackedKmersDevice(
-                thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapPackedKmers.data()),
-                fixture.numKmers,
-                thrust::raw_pointer_cast(fixture.d_output.data())
+                bloom::device_span<const uint64_t>{
+                    thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapPackedKmers.data()),
+                    fixture.numKmers
+                },
+                bloom::device_span<uint8_t>{
+                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+                }
             );
         } else {
             fixture.filter->containsSequenceDevice(
-                thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
-                fixture.sequenceLength,
-                thrust::raw_pointer_cast(fixture.d_output.data())
+                bloom::device_span<const char>{
+                    thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
+                    fixture.sequenceLength
+                },
+                bloom::device_span<uint8_t>{
+                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+                }
             );
         }
         const double elapsed = fixture.timer.elapsed();
