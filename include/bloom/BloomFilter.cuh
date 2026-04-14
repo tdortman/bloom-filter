@@ -1056,15 +1056,10 @@ __global__ void insertSequenceKmersKernel(
         static_cast<uint32_t>(active ? (minimizerHash & (shards.size() - 1)) : ~threadIdx.x);
 
     const unsigned peers = __match_any_sync(0xffffffff, shardIdx);
-    const auto reduce64 = [&](uint64_t v) -> uint64_t {
-        auto lo = __reduce_or_sync(peers, static_cast<unsigned>(v));
-        auto hi = __reduce_or_sync(peers, static_cast<unsigned>(v >> 32));
-        return (static_cast<uint64_t>(hi) << 32) | lo;
-    };
-    wordMask0 = reduce64(wordMask0);
-    wordMask1 = reduce64(wordMask1);
-    wordMask2 = reduce64(wordMask2);
-    wordMask3 = reduce64(wordMask3);
+    wordMask0 = warpReduceOr(peers, wordMask0);
+    wordMask1 = warpReduceOr(peers, wordMask1);
+    wordMask2 = warpReduceOr(peers, wordMask2);
+    wordMask3 = warpReduceOr(peers, wordMask3);
     const bool isLeader = (threadIdx.x & 31) == static_cast<unsigned>(__ffs(peers) - 1);
 
     if (isLeader && active) {

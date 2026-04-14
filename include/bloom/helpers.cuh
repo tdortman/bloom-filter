@@ -97,6 +97,33 @@ __device__ __forceinline__ void load256BitGlobalNC(
 #endif
 
 /**
+ * @brief OR-reduce a uint64_t across the lanes in a peer mask.
+ *
+ * On sm_80+ uses __reduce_or_sync, on older architectures falls back
+ * to a shuffle-based reduction.
+ */
+__device__ __forceinline__ uint64_t warpReduceOr(uint32_t peers, uint64_t value) {
+#if __CUDA_ARCH__ >= 800
+    auto lo = __reduce_or_sync(peers, static_cast<uint32_t>(value));
+    auto hi = __reduce_or_sync(peers, static_cast<uint32_t>(value >> 32));
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+#else
+    // Shuffle-based reduction across the lanes set in `peers`.
+    uint32_t remaining = peers;
+    while (remaining) {
+        int src = __ffs(remaining) - 1;
+        uint64_t other =
+            (static_cast<uint64_t>(__shfl_sync(peers, static_cast<uint32_t>(value >> 32), src))
+             << 32) |
+            __shfl_sync(peers, static_cast<uint32_t>(value), src);
+        value |= other;
+        remaining &= remaining - 1;  // clear lowest set bit
+    }
+    return value;
+#endif
+}
+
+/**
  * @brief Macro for checking CUDA errors.
  * Throws bloom::CudaError on failure.
  */
