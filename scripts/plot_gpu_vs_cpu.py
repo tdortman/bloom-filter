@@ -77,7 +77,7 @@ def generate_plot(
         cpu_val = cpu_medians[key] / scale
 
         bars = ax.bar(
-            ["GPU", "CPU (Rust)"],
+            ["GPU", "CPU"],
             [gpu_val, cpu_val],
             color=[gpu_style["color"], cpu_color],
             edgecolor="black",
