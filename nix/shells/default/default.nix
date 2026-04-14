@@ -62,6 +62,7 @@ mkShell {
     CompileFlags:
       Compiler: ${cuda.path}/bin/nvcc
       Add:
+        - -std=c++20
         - -xcuda
         - --cuda-path=${cuda.path}
         - -D__INTELLISENSE__
