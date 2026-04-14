@@ -178,93 +178,6 @@ def _filter_bits_from_exponent(exponent: int) -> int:
     return 1 << exponent
 
 
-def _generate_plot(
-    gpu_medians: dict[str, float],
-    cpu_medians: dict[str, float],
-    output_path: Path,
-) -> None:
-    """Generate a comparison bar chart."""
-    try:
-        import matplotlib.pyplot as plt
-        from plot_utils import (
-            AXIS_LABEL_FONT_SIZE,
-            BAR_FONT_SIZE,
-            FILTER_STYLES,
-            GRID_ALPHA,
-            TITLE_FONT_SIZE,
-            save_figure,
-        )
-    except ImportError as e:
-        typer.secho(
-            f"Plotting requires matplotlib and plot_utils: {e}",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-        return
-
-    metrics = [
-        ("index_kmers_per_s", "Index Throughput", 1e9, "B k-mers/s"),
-        ("query_kmers_per_s", "Query Throughput", 1e9, "B k-mers/s"),
-    ]
-
-    available = [
-        (k, label, scale, unit)
-        for k, label, scale, unit in metrics
-        if k in gpu_medians and k in cpu_medians
-    ]
-
-    if not available:
-        typer.secho("No common metrics to plot.", fg=typer.colors.YELLOW, err=True)
-        return
-
-    fig, axes = plt.subplots(1, len(available), figsize=(5 * len(available), 5))
-    if len(available) == 1:
-        axes = [axes]
-
-    gpu_style = FILTER_STYLES["superbloom"]
-    cpu_color = "#E8871E"
-
-    for ax, (key, label, scale, unit) in zip(axes, available):
-        gpu_val = gpu_medians[key] / scale
-        cpu_val = cpu_medians[key] / scale
-
-        bars = ax.bar(
-            ["GPU", "CPU (Rust)"],
-            [gpu_val, cpu_val],
-            color=[gpu_style["color"], cpu_color],
-            edgecolor="black",
-            linewidth=0.5,
-        )
-
-        for bar, val in zip(bars, [gpu_val, cpu_val]):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height(),
-                f"{val:.3g}",
-                ha="center",
-                va="bottom",
-                fontsize=BAR_FONT_SIZE,
-                fontweight="bold",
-            )
-
-        ax.set_yscale("log")
-        ax.set_ylabel(
-            f"{label} [{unit}]", fontsize=AXIS_LABEL_FONT_SIZE, fontweight="bold"
-        )
-        ax.set_title(label, fontsize=TITLE_FONT_SIZE, fontweight="bold")
-        ax.grid(True, axis="y", ls="--", alpha=GRID_ALPHA)
-
-    config_str = f"K={GPU_CONFIG['k']} S={GPU_CONFIG['s']} M={GPU_CONFIG['m']} H={GPU_CONFIG['n_hashes']}"
-    fig.suptitle(
-        f"GPU vs CPU SuperBloom ({config_str})",
-        fontsize=TITLE_FONT_SIZE + 2,
-        fontweight="bold",
-        y=1.02,
-    )
-    fig.tight_layout()
-    save_figure(fig, output_path)
-
-
 @app.command()
 def main(
     index_fasta: str = typer.Option(
@@ -394,9 +307,11 @@ def main(
 
     # --- Plot ---
     if plot:
+        from plot_gpu_vs_cpu import generate_plot
+
         if plot_output is None:
             plot_output = output_csv.with_suffix(".pdf")
-        _generate_plot(gpu_medians, cpu_medians, plot_output)
+        generate_plot(gpu_medians, cpu_medians, plot_output, config=GPU_CONFIG)
 
 
 if __name__ == "__main__":
