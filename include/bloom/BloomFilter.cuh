@@ -792,7 +792,7 @@ template <typename Config>
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t packedMmer =
             extractPackedSubwindow<Config::m, Config::k>(packedKmer, offset);
-        minimizerHash = min(minimizerHash, detail::hash64(packedMmer));
+        minimizerHash = min(minimizerHash, detail::minimizerHash64(packedMmer));
     }
     return minimizerHash;
 }
@@ -861,12 +861,17 @@ __global__ void containsSequenceKmersKernel(
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
+    __shared__ nthash::SeedTable smemSeeds;
+    __shared__ nthash::SeedTable smemRolledM;
+    __shared__ nthash::SeedTable smemRolledS;
 
     const uint64_t numKmers = input.kmerCount();
     const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
     if (blockStartKmer >= numKmers) {
         return;
     }
+
+    nthash::initSeedTables<Config::m, Config::s>(smemSeeds, smemRolledM, smemRolledS);
 
     const uint64_t blockKmers =
         min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
@@ -898,14 +903,15 @@ __global__ void containsSequenceKmersKernel(
         }
     }
 
-    uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex);
+    uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex, smemSeeds);
     uint64_t minimizerHash = h_m;
     _Pragma("unroll 1")
     for (uint64_t offset = 1; offset < Config::minimizerSpan; ++offset) {
         h_m = nthash::rollHash<Config::m>(
             h_m,
             sequenceTile[localKmerIndex + offset - 1],
-            sequenceTile[localKmerIndex + offset - 1 + Config::m]
+            sequenceTile[localKmerIndex + offset - 1 + Config::m],
+            smemSeeds, smemRolledM
         );
         minimizerHash = min(minimizerHash, h_m);
     }
@@ -913,7 +919,7 @@ __global__ void containsSequenceKmersKernel(
     typename Config::WordType w[4] = {};
     loadShardWords4<Config>(shards.data(), minimizerHash & (shards.size() - 1), w);
 
-    uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex);
+    uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex, smemSeeds);
     bool present = true;
     if (!Filter<Config>::Shard::sectorizedContainsHash(w, h_s)) {
         present = false;
@@ -923,7 +929,8 @@ __global__ void containsSequenceKmersKernel(
             h_s = nthash::rollHash<Config::s>(
                 h_s,
                 sequenceTile[localKmerIndex + smerOffset - 1],
-                sequenceTile[localKmerIndex + smerOffset - 1 + Config::s]
+                sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
+                smemSeeds, smemRolledS
             );
             if (!Filter<Config>::Shard::sectorizedContainsHash(w, h_s)) {
                 present = false;
@@ -963,12 +970,17 @@ __global__ void insertSequenceKmersKernel(
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
+    __shared__ nthash::SeedTable smemSeeds;
+    __shared__ nthash::SeedTable smemRolledM;
+    __shared__ nthash::SeedTable smemRolledS;
 
     const uint64_t numKmers = input.kmerCount();
     const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
     if (blockStartKmer >= numKmers) {
         return;
     }
+
+    nthash::initSeedTables<Config::m, Config::s>(smemSeeds, smemRolledM, smemRolledS);
 
     const uint64_t blockKmers =
         min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
@@ -997,14 +1009,15 @@ __global__ void insertSequenceKmersKernel(
         }
     }
 
-    uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex);
+    uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex, smemSeeds);
     uint64_t minimizerHash = h_m;
     _Pragma("unroll 1")
     for (uint64_t offset = 1; offset < Config::minimizerSpan; ++offset) {
         h_m = nthash::rollHash<Config::m>(
             h_m,
             sequenceTile[localKmerIndex + offset - 1],
-            sequenceTile[localKmerIndex + offset - 1 + Config::m]
+            sequenceTile[localKmerIndex + offset - 1 + Config::m],
+            smemSeeds, smemRolledM
         );
         minimizerHash = min(minimizerHash, h_m);
     }
@@ -1014,14 +1027,15 @@ __global__ void insertSequenceKmersKernel(
     typename Config::WordType wordMask2 = 0;
     typename Config::WordType wordMask3 = 0;
 
-    uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex);
+    uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex, smemSeeds);
     Filter<Config>::Shard::sectorizedHashToMasks(h_s, wordMask0, wordMask1, wordMask2, wordMask3);
     _Pragma("unroll 1")
     for (uint64_t smerOffset = 1; smerOffset < Config::findereSpan; ++smerOffset) {
         h_s = nthash::rollHash<Config::s>(
             h_s,
             sequenceTile[localKmerIndex + smerOffset - 1],
-            sequenceTile[localKmerIndex + smerOffset - 1 + Config::s]
+            sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
+            smemSeeds, smemRolledS
         );
         Filter<Config>::Shard::sectorizedHashToMasks(
             h_s, wordMask0, wordMask1, wordMask2, wordMask3
@@ -1074,7 +1088,11 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKer
         WordType laneMask = 0;
         _Pragma("unroll 1")
         for (uint64_t s = 0; s < Config::findereSpan; ++s) {
-            const uint64_t smerHash = packedKmerSmerHash<Config>(srcPackedKmer, s);
+            uint64_t smerHash = 0;
+            if (lane == 0) {
+                smerHash = packedKmerSmerHash<Config>(srcPackedKmer, s);
+            }
+            smerHash = tile.shfl(smerHash, 0);
             laneMask |= Filter<Config>::Shard::sectorizedHashToMask(smerHash, lane);
         }
 

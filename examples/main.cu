@@ -60,7 +60,7 @@ std::string makeFastqRecord(std::string_view name, std::string_view sequence, ui
 }
 
 int main(int argc, char** argv) {
-    using Config = bloom::Config<31, 27, 21, 6, 256>;
+    using Config = bloom::Config<31, 24, 21, 6, 256>;
 
     CLI::App app{"GPU SuperBloom demo"};
 
