@@ -203,9 +203,12 @@ struct SeedTable {
     uint64_t v[4];
 };
 
+/// Thread-0 writes seeds + rolled-seed LUTs into shared memory.
+/// Caller must barrier (e.g. __syncthreads) before reading.
 template <uint64_t W_m, uint64_t W_s>
-__device__ __forceinline__ void
-initSeedTables(SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS) {
+__device__ __forceinline__ void initSeedTables(
+    SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS
+) {
     if (threadIdx.x == 0) {
         seeds.v[0] = SEED_A;
         seeds.v[1] = SEED_C;
@@ -223,8 +226,10 @@ initSeedTables(SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS) {
 }
 
 template <uint64_t WindowLength>
-__device__ __forceinline__ uint64_t
-baseHash(const uint8_t* encodedBases, uint64_t start, const SeedTable& seeds) {
+__device__ __forceinline__ uint64_t baseHash(
+    const uint8_t* encodedBases, uint64_t start,
+    const SeedTable& seeds
+) {
     uint64_t h = 0;
     _Pragma("unroll")
     for (uint64_t i = 0; i < WindowLength; ++i) {
@@ -235,11 +240,8 @@ baseHash(const uint8_t* encodedBases, uint64_t start, const SeedTable& seeds) {
 
 template <uint64_t WindowLength>
 __device__ __forceinline__ uint64_t rollHash(
-    uint64_t h,
-    uint8_t baseOut,
-    uint8_t baseIn,
-    const SeedTable& seeds,
-    const SeedTable& rolledSeeds
+    uint64_t h, uint8_t baseOut, uint8_t baseIn,
+    const SeedTable& seeds, const SeedTable& rolledSeeds
 ) {
     return rol1(h) ^ seeds.v[baseIn & 0x3u] ^ rolledSeeds.v[baseOut & 0x3u];
 }

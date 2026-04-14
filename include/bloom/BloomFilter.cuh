@@ -911,7 +911,8 @@ __global__ void containsSequenceKmersKernel(
             h_m,
             sequenceTile[localKmerIndex + offset - 1],
             sequenceTile[localKmerIndex + offset - 1 + Config::m],
-            smemSeeds, smemRolledM
+            smemSeeds,
+            smemRolledM
         );
         minimizerHash = min(minimizerHash, h_m);
     }
@@ -930,7 +931,8 @@ __global__ void containsSequenceKmersKernel(
                 h_s,
                 sequenceTile[localKmerIndex + smerOffset - 1],
                 sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
-                smemSeeds, smemRolledS
+                smemSeeds,
+                smemRolledS
             );
             if (!Filter<Config>::Shard::sectorizedContainsHash(w, h_s)) {
                 present = false;
@@ -991,69 +993,94 @@ __global__ void insertSequenceKmersKernel(
         input.sequence.data(), blockStartKmer, blockKmers, sequenceTile
     );
 
-    if (!inRange) {
-        return;
-    }
+    // Avoid early returns so all warp lanes can participate in
+    // __match_any_sync / __reduce_or_sync below.
+    bool active = inRange;
 
-    if (!blockAllValid) {
-        bool kmerValid = true;
+    if (active && !blockAllValid) {
         _Pragma("unroll")
         for (uint64_t i = 0; i < Config::k; ++i) {
             if (sequenceTile[localKmerIndex + i] > 3) {
-                kmerValid = false;
+                active = false;
                 break;
             }
         }
-        if (!kmerValid) {
-            return;
-        }
     }
 
-    uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex, smemSeeds);
-    uint64_t minimizerHash = h_m;
-    _Pragma("unroll 1")
-    for (uint64_t offset = 1; offset < Config::minimizerSpan; ++offset) {
-        h_m = nthash::rollHash<Config::m>(
-            h_m,
-            sequenceTile[localKmerIndex + offset - 1],
-            sequenceTile[localKmerIndex + offset - 1 + Config::m],
-            smemSeeds, smemRolledM
-        );
-        minimizerHash = min(minimizerHash, h_m);
-    }
-
+    // Inactive threads keep zero masks and a per-lane sentinel shard index
+    // so they never match an active thread in __match_any_sync.
+    uint64_t minimizerHash = 0;
     typename Config::WordType wordMask0 = 0;
     typename Config::WordType wordMask1 = 0;
     typename Config::WordType wordMask2 = 0;
     typename Config::WordType wordMask3 = 0;
 
-    uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex, smemSeeds);
-    Filter<Config>::Shard::sectorizedHashToMasks(h_s, wordMask0, wordMask1, wordMask2, wordMask3);
-    _Pragma("unroll 1")
-    for (uint64_t smerOffset = 1; smerOffset < Config::findereSpan; ++smerOffset) {
-        h_s = nthash::rollHash<Config::s>(
-            h_s,
-            sequenceTile[localKmerIndex + smerOffset - 1],
-            sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
-            smemSeeds, smemRolledS
-        );
+    if (active) {
+        uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex, smemSeeds);
+        minimizerHash = h_m;
+        _Pragma("unroll 1")
+        for (uint64_t offset = 1; offset < Config::minimizerSpan; ++offset) {
+            h_m = nthash::rollHash<Config::m>(
+                h_m,
+                sequenceTile[localKmerIndex + offset - 1],
+                sequenceTile[localKmerIndex + offset - 1 + Config::m],
+                smemSeeds,
+                smemRolledM
+            );
+            minimizerHash = min(minimizerHash, h_m);
+        }
+
+        uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex, smemSeeds);
         Filter<Config>::Shard::sectorizedHashToMasks(
             h_s, wordMask0, wordMask1, wordMask2, wordMask3
         );
+        _Pragma("unroll 1")
+        for (uint64_t smerOffset = 1; smerOffset < Config::findereSpan; ++smerOffset) {
+            h_s = nthash::rollHash<Config::s>(
+                h_s,
+                sequenceTile[localKmerIndex + smerOffset - 1],
+                sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
+                smemSeeds,
+                smemRolledS
+            );
+            Filter<Config>::Shard::sectorizedHashToMasks(
+                h_s, wordMask0, wordMask1, wordMask2, wordMask3
+            );
+        }
     }
 
-    auto& shard = shards[minimizerHash & (shards.size() - 1)];
-    if (wordMask0 != 0) {
-        atomicOrWord(&shard.words[0], wordMask0);
-    }
-    if (wordMask1 != 0) {
-        atomicOrWord(&shard.words[1], wordMask1);
-    }
-    if (wordMask2 != 0) {
-        atomicOrWord(&shard.words[2], wordMask2);
-    }
-    if (wordMask3 != 0) {
-        atomicOrWord(&shard.words[3], wordMask3);
+    // Warp-aggregated reductions: threads sharing the same shard merge their
+    // masks so only one representative issues the atomicOr
+    // Inactive threads use a per-lane sentinel that never matches peers.
+    const auto shardIdx =
+        static_cast<uint32_t>(active ? (minimizerHash & (shards.size() - 1)) : ~threadIdx.x);
+
+    const unsigned peers = __match_any_sync(0xffffffff, shardIdx);
+    const auto reduce64 = [&](uint64_t v) -> uint64_t {
+        auto lo = __reduce_or_sync(peers, static_cast<unsigned>(v));
+        auto hi = __reduce_or_sync(peers, static_cast<unsigned>(v >> 32));
+        return (static_cast<uint64_t>(hi) << 32) | lo;
+    };
+    wordMask0 = reduce64(wordMask0);
+    wordMask1 = reduce64(wordMask1);
+    wordMask2 = reduce64(wordMask2);
+    wordMask3 = reduce64(wordMask3);
+    const bool isLeader = (threadIdx.x & 31) == static_cast<unsigned>(__ffs(peers) - 1);
+
+    if (isLeader && active) {
+        auto& shard = shards[shardIdx];
+        if (wordMask0 != 0) {
+            atomicOrWord(&shard.words[0], wordMask0);
+        }
+        if (wordMask1 != 0) {
+            atomicOrWord(&shard.words[1], wordMask1);
+        }
+        if (wordMask2 != 0) {
+            atomicOrWord(&shard.words[2], wordMask2);
+        }
+        if (wordMask3 != 0) {
+            atomicOrWord(&shard.words[3], wordMask3);
+        }
     }
 }
 
