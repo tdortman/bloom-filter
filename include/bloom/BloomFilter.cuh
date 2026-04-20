@@ -318,21 +318,6 @@ class Filter {
             }
         }
 
-        [[nodiscard]] __device__ __forceinline__ static bool
-        sectorizedContainsHash(const WordType* w, uint64_t baseHash) {
-            bool present = true;
-            detail::forEachHashIndex<Config>(
-                [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
-                    if (!present)
-                        return;
-                    constexpr uint64_t s = HashIndex % Config::blockWordCount;
-                    const uint64_t bitPos = sectorizedBitAddress<HashIndex>(baseHash);
-                    present = (w[s] & (WordType{1} << bitPos)) != 0;
-                }
-            );
-            return present;
-        }
-
         __device__ __forceinline__ static void sectorizedHashToMasks(
             uint64_t baseHash,
             WordType& mask0,
@@ -353,19 +338,6 @@ class Filter {
                     // clang-format on
                 }
             );
-        }
-
-        [[nodiscard]] __device__ __forceinline__ static WordType
-        sectorizedHashToMask(uint64_t baseHash, uint64_t activeWordIndex) {
-            WordType mask = 0;
-            detail::forEachHashIndex<Config>(
-                [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
-                    constexpr uint64_t s = HashIndex % Config::blockWordCount;
-                    const uint64_t bitPos = sectorizedBitAddress<HashIndex>(baseHash);
-                    mask |= WordType(s == activeWordIndex) << bitPos;
-                }
-            );
-            return mask;
         }
     };
 
@@ -678,20 +650,6 @@ __device__ __forceinline__ void loadShardWords4(
 #endif
 }
 
-template <typename Config>
-__device__ __forceinline__ void loadShardWords4Cached(
-    const typename Filter<Config>::Shard* shards,
-    uint64_t shardIndex,
-    typename Filter<Config>::WordType* w
-) {
-#if __CUDA_ARCH__ >= 1000
-    detail::load256BitGlobalNC(shards[shardIndex].words, w[0], w[1], w[2], w[3]);
-#else
-    detail::load128BitGlobalNC(shards[shardIndex].words + 0, w[0], w[1]);
-    detail::load128BitGlobalNC(shards[shardIndex].words + 2, w[2], w[3]);
-#endif
-}
-
 template <uint64_t K>
 __device__ __forceinline__ uint64_t packKmerFromTile(const uint8_t* tile, uint64_t start) {
     uint64_t packed = 0;
@@ -709,21 +667,19 @@ __device__ __forceinline__ uint64_t advancePackedKmer(uint64_t packed, uint8_t n
 
 template <typename Config>
 __device__ __forceinline__ bool
-sectorizedContainsPackedKmerFused(uint64_t packedKmer, const typename Filter<Config>::WordType* w) {
+sectorizedContainsPackedKmer(uint64_t packedKmer, const typename Filter<Config>::WordType* w) {
     bool present = true;
     _Pragma("unroll")
     for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
         const uint64_t smerHash = packedKmerSmerHash<Config>(packedKmer, smerOffset);
-        bool allSet = true;
         detail::forEachHashIndex<Config>(
             [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
                 constexpr uint64_t s = HashIndex % Config::blockWordCount;
                 const uint64_t bitPos =
                     Filter<Config>::Shard::template sectorizedBitAddress<HashIndex>(smerHash);
-                allSet &= ((w[s] >> bitPos) & 1) != 0;
+                present &= ((w[s] >> bitPos) & 1) != 0;
             }
         );
-        present &= allSet;
     }
     return present;
 }
@@ -783,13 +739,13 @@ __global__ void containsSequenceKmersKernel(
 
     // Per-k-mer validity tracking when the tile contains invalid bases.
     bool kmerValid[kStride];
-#pragma unroll
-    for (uint32_t s = 0; s < kStride; ++s) {
-        kmerValid[s] = true;
+    _Pragma("unroll")
+    for (bool & s : kmerValid) {
+        s = true;
     }
 
     if (!blockAllValid) {
-#pragma unroll
+        _Pragma("unroll")
         for (uint32_t s = 0; s < kStride; ++s) {
             const uint64_t localIdx = threadOffset + s;
             if (localIdx >= blockKmers) {
@@ -797,7 +753,7 @@ __global__ void containsSequenceKmersKernel(
                 continue;
             }
             bool valid = true;
-#pragma unroll
+            _Pragma("unroll")
             for (uint64_t i = 0; i < Config::k; ++i) {
                 if (sequenceTile[localIdx + i] > 3) {
                     valid = false;
@@ -808,9 +764,10 @@ __global__ void containsSequenceKmersKernel(
         }
     }
 
-    // Find the first valid k-mer to start packing; earlier invalid kmers are written as 0.
+    // Find the first valid k-mer to start packing
+    // earlier invalid kmers are written as 0.
     int firstValidPos = -1;
-#pragma unroll
+    _Pragma("unroll")
     for (uint32_t s = 0; s < kStride; ++s) {
         if (kmerValid[s]) {
             firstValidPos = static_cast<int>(s);
@@ -858,14 +815,14 @@ __global__ void containsSequenceKmersKernel(
 
         typename Config::WordType w[4] = {};
         if (static_cast<int>(threadIdx.x & 31u) == leader) {
-            loadShardWords4Cached<Config>(shards.data(), shardIdx, w);
+            loadShardWords4<Config>(shards.data(), shardIdx, w);
         }
         w[0] = __shfl_sync(peers, w[0], leader);
         w[1] = __shfl_sync(peers, w[1], leader);
         w[2] = __shfl_sync(peers, w[2], leader);
         w[3] = __shfl_sync(peers, w[3], leader);
 
-        const bool present = sectorizedContainsPackedKmerFused<Config>(packedKmer, w);
+        const bool present = sectorizedContainsPackedKmer<Config>(packedKmer, w);
         output[kmerIndex] = static_cast<uint8_t>(present);
     }
 }
