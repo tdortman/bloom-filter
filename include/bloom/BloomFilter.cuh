@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
 #include <cuda/std/bit>
@@ -104,24 +103,12 @@ class Filter;
 
 namespace detail {
 
-namespace cg = cooperative_groups;
-
 template <typename Config>
 struct SequenceKmerInput;
 
 template <typename Config>
-struct PackedKmerInput;
-
-template <typename Config>
 __global__ void containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
-    device_span<const typename Filter<Config>::Shard> shards,
-    device_span<uint8_t> output
-);
-
-template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersKernel(
-    PackedKmerInput<Config> input,
     device_span<const typename Filter<Config>::Shard> shards,
     device_span<uint8_t> output
 );
@@ -137,12 +124,6 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
 template <typename Config>
 __global__ void insertSequenceKmersKernel(
     SequenceKmerInput<Config> input,
-    device_span<typename Filter<Config>::Shard> shards
-);
-
-template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKernel(
-    PackedKmerInput<Config> input,
     device_span<typename Filter<Config>::Shard> shards
 );
 
@@ -325,8 +306,16 @@ class Filter {
             uint64_t baseHash
         ) {
             static_assert(HashIndex < Config::hashCount, "Hash index out of range");
-            const uint64_t mixed = baseHash * detail::multiplicativeSaltLiteral<HashIndex>();
-            return static_cast<uint64_t>(mixed >> (64 - wordBitsLog2));
+            // When there are enough bits in a 64-bit hash to give each hash
+            // index its own slice, avoid the extra multiply and use
+            // bit-slicing instead.
+            if constexpr (64 / Config::hashCount >= wordBitsLog2) {
+                constexpr uint64_t sliceWidth = 64 / Config::hashCount;
+                return (baseHash >> (sliceWidth * HashIndex)) & ((1ULL << wordBitsLog2) - 1);
+            } else {
+                const uint64_t mixed = baseHash * detail::multiplicativeSaltLiteral<HashIndex>();
+                return static_cast<uint64_t>(mixed >> (64 - wordBitsLog2));
+            }
         }
 
         [[nodiscard]] __device__ __forceinline__ static bool
@@ -439,37 +428,6 @@ class Filter {
         return totalKmers;
     }
 
-    [[nodiscard]] uint64_t insertPackedKmers(
-        cuda::std::span<const uint64_t> kmers,
-        cuda::stream_ref stream = cudaStream_t{}
-    ) {
-        if (kmers.empty()) {
-            return 0;
-        }
-
-        stagePackedKmers(kmers, stream);
-        launchInsertPacked(
-            device_span<const uint64_t>{
-                thrust::raw_pointer_cast(d_packedKmers_.data()), kmers.size()
-            },
-            stream
-        );
-        CUDA_CALL(cudaStreamSynchronize(stream.get()));
-        return kmers.size();
-    }
-
-    [[nodiscard]] uint64_t insertPackedKmersDevice(
-        device_span<const uint64_t> d_kmers,
-        cuda::stream_ref stream = cudaStream_t{}
-    ) {
-        if (d_kmers.empty()) {
-            return 0;
-        }
-
-        launchInsertPacked(d_kmers, stream);
-        return d_kmers.size();
-    }
-
     [[nodiscard]] FastxInsertReport
     insertFastx(std::istream& input, cuda::stream_ref stream = cudaStream_t{}) {
         return insertFastxStream(input, "<stream>", stream);
@@ -516,47 +474,6 @@ class Filter {
             stream.get()
         ));
 
-        CUDA_CALL(cudaStreamSynchronize(stream.get()));
-        return output;
-    }
-
-    void containsPackedKmersDevice(
-        device_span<const uint64_t> d_kmers,
-        device_span<uint8_t> d_output,
-        cuda::stream_ref stream = cudaStream_t{}
-    ) const {
-        if (d_kmers.empty()) {
-            return;
-        }
-
-        launchContainsPacked(d_kmers, d_output, stream);
-    }
-
-    [[nodiscard]] std::vector<uint8_t> containsPackedKmers(
-        cuda::std::span<const uint64_t> kmers,
-        cuda::stream_ref stream = cudaStream_t{}
-    ) const {
-        if (kmers.empty()) {
-            return {};
-        }
-
-        std::vector<uint8_t> output(kmers.size());
-        stagePackedKmers(kmers, stream);
-        ensureResultCapacity(kmers.size());
-        launchContainsPacked(
-            device_span<const uint64_t>{
-                thrust::raw_pointer_cast(d_packedKmers_.data()), kmers.size()
-            },
-            device_span<uint8_t>{thrust::raw_pointer_cast(d_resultBuffer_.data()), kmers.size()},
-            stream
-        );
-        CUDA_CALL(cudaMemcpyAsync(
-            output.data(),
-            thrust::raw_pointer_cast(d_resultBuffer_.data()),
-            output.size() * sizeof(uint8_t),
-            cudaMemcpyDeviceToHost,
-            stream.get()
-        ));
         CUDA_CALL(cudaStreamSynchronize(stream.get()));
         return output;
     }
@@ -612,7 +529,6 @@ class Filter {
 
     thrust::device_vector<Shard> d_shards_;
     mutable thrust::device_vector<char> d_sequence_;
-    mutable thrust::device_vector<uint64_t> d_packedKmers_;
     mutable thrust::device_vector<uint8_t> d_resultBuffer_;
 
     [[nodiscard]] uint64_t shardCount() const {
@@ -669,29 +585,12 @@ class Filter {
         }
     }
 
-    void ensurePackedKmerCapacity(uint64_t kmers) const {
-        if (kmers > d_packedKmers_.size()) {
-            d_packedKmers_.resize(kmers);
-        }
-    }
-
     void stageSequence(cuda::std::span<const char> sequence, cuda::stream_ref stream) const {
         ensureSequenceCapacity(sequence.size());
         CUDA_CALL(cudaMemcpyAsync(
             thrust::raw_pointer_cast(d_sequence_.data()),
             sequence.data(),
             sequence.size_bytes(),
-            cudaMemcpyHostToDevice,
-            stream.get()
-        ));
-    }
-
-    void stagePackedKmers(cuda::std::span<const uint64_t> kmers, cuda::stream_ref stream) const {
-        ensurePackedKmerCapacity(kmers.size());
-        CUDA_CALL(cudaMemcpyAsync(
-            thrust::raw_pointer_cast(d_packedKmers_.data()),
-            kmers.data(),
-            kmers.size_bytes(),
             cudaMemcpyHostToDevice,
             stream.get()
         ));
@@ -712,20 +611,6 @@ class Filter {
         CUDA_CALL(cudaGetLastError());
     }
 
-    void launchInsertPacked(device_span<const uint64_t> d_kmers, cuda::stream_ref stream) {
-        if (d_kmers.empty()) {
-            return;
-        }
-        const uint64_t gridSize = detail::divUp(d_kmers.size(), Config::cudaBlockSize);
-
-        detail::insertPackedKmersKernel<Config>
-            <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
-                detail::PackedKmerInput<Config>{d_kmers},
-                device_span<Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_}
-            );
-        CUDA_CALL(cudaGetLastError());
-    }
-
     void launchContainsSequence(
         device_span<const char> d_sequence,
         device_span<uint8_t> d_output,
@@ -738,22 +623,6 @@ class Filter {
         detail::containsSequenceKmersKernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
                 detail::SequenceKmerInput<Config>{d_sequence},
-                device_span<const Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_},
-                d_output
-            );
-        CUDA_CALL(cudaGetLastError());
-    }
-
-    void launchContainsPacked(
-        device_span<const uint64_t> d_kmers,
-        device_span<uint8_t> d_output,
-        cuda::stream_ref stream
-    ) const {
-        const uint64_t gridSize = detail::divUp(d_kmers.size(), Config::cudaBlockSize);
-
-        detail::containsPackedKmersKernel<Config>
-            <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
-                detail::PackedKmerInput<Config>{d_kmers},
                 device_span<const Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_},
                 d_output
             );
@@ -777,18 +646,9 @@ struct SequenceKmerInput {
 };
 
 template <typename Config>
-struct PackedKmerInput {
-    device_span<const uint64_t> kmers;
-
-    [[nodiscard]] constexpr __host__ __device__ uint64_t kmerCount() const {
-        return kmers.size();
-    }
-};
-
-template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t packedKmerMinimizerHash(uint64_t packedKmer) {
     uint64_t minimizerHash = kInvalidHash;
-    _Pragma("unroll 1")
+    _Pragma("unroll")
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t packedMmer =
             extractPackedSubwindow<Config::m, Config::k>(packedKmer, offset);
@@ -805,19 +665,6 @@ packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
 }
 
 template <typename Config>
-[[nodiscard]] __device__ __forceinline__ bool
-sectorizedContainsPackedKmer(uint64_t packedKmer, const typename Filter<Config>::WordType* w) {
-    _Pragma("unroll")
-    for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
-        const uint64_t smerHash = packedKmerSmerHash<Config>(packedKmer, smerOffset);
-        if (!Filter<Config>::Shard::sectorizedContainsHash(w, smerHash)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-template <typename Config>
 __device__ __forceinline__ void loadShardWords4(
     const typename Filter<Config>::Shard* shards,
     uint64_t shardIndex,
@@ -826,12 +673,59 @@ __device__ __forceinline__ void loadShardWords4(
 #if __CUDA_ARCH__ >= 1000
     detail::load256BitGlobalNC(shards[shardIndex].words, w[0], w[1], w[2], w[3]);
 #else
-    const auto& shard = shards[shardIndex];
-    w[0] = shard.words[0];
-    w[1] = shard.words[1];
-    w[2] = shard.words[2];
-    w[3] = shard.words[3];
+    detail::load128BitGlobalNC(shards[shardIndex].words + 0, w[0], w[1]);
+    detail::load128BitGlobalNC(shards[shardIndex].words + 2, w[2], w[3]);
 #endif
+}
+
+template <typename Config>
+__device__ __forceinline__ void loadShardWords4Cached(
+    const typename Filter<Config>::Shard* shards,
+    uint64_t shardIndex,
+    typename Filter<Config>::WordType* w
+) {
+#if __CUDA_ARCH__ >= 1000
+    detail::load256BitGlobalNC(shards[shardIndex].words, w[0], w[1], w[2], w[3]);
+#else
+    detail::load128BitGlobalNC(shards[shardIndex].words + 0, w[0], w[1]);
+    detail::load128BitGlobalNC(shards[shardIndex].words + 2, w[2], w[3]);
+#endif
+}
+
+template <uint64_t K>
+__device__ __forceinline__ uint64_t packKmerFromTile(const uint8_t* tile, uint64_t start) {
+    uint64_t packed = 0;
+    _Pragma("unroll")
+    for (uint64_t i = 0; i < K; ++i) {
+        packed = (packed << 2) | static_cast<uint64_t>(tile[start + i] & 0x3u);
+    }
+    return packed;
+}
+
+template <uint64_t K>
+__device__ __forceinline__ uint64_t advancePackedKmer(uint64_t packed, uint8_t newBase) {
+    return ((packed << 2) | static_cast<uint64_t>(newBase & 0x3u)) & packedWindowMask<K>();
+}
+
+template <typename Config>
+__device__ __forceinline__ bool
+sectorizedContainsPackedKmerFused(uint64_t packedKmer, const typename Filter<Config>::WordType* w) {
+    bool present = true;
+    _Pragma("unroll")
+    for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
+        const uint64_t smerHash = packedKmerSmerHash<Config>(packedKmer, smerOffset);
+        bool allSet = true;
+        detail::forEachHashIndex<Config>(
+            [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
+                constexpr uint64_t s = HashIndex % Config::blockWordCount;
+                const uint64_t bitPos =
+                    Filter<Config>::Shard::template sectorizedBitAddress<HashIndex>(smerHash);
+                allSet &= ((w[s] >> bitPos) & 1) != 0;
+            }
+        );
+        present &= allSet;
+    }
+    return present;
 }
 
 template <typename Config>
@@ -858,110 +752,122 @@ __global__ void containsSequenceKmersKernel(
     device_span<const typename Filter<Config>::Shard> shards,
     device_span<uint8_t> output
 ) {
-    constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
+    // Each thread handles this many consecutive k-mers to amortise packing
+    // and (when minimizers repeat) shard loads.
+    constexpr uint32_t kStride = 4;
+    constexpr uint64_t sequenceTileBases = Config::cudaBlockSize * kStride + Config::k - 1;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
-    __shared__ nthash::SeedTable smemSeeds;
-    __shared__ nthash::SeedTable smemRolledM;
-    __shared__ nthash::SeedTable smemRolledS;
 
     const uint64_t numKmers = input.kmerCount();
-    const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
+    const uint64_t blockStartKmer =
+        static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize * kStride;
     if (blockStartKmer >= numKmers) {
         return;
     }
 
-    nthash::initSeedTables<Config::m, Config::s>(smemSeeds, smemRolledM, smemRolledS);
-
     const uint64_t blockKmers =
-        min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
-    const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
-    const bool inRange = localKmerIndex < blockKmers;
+        min(static_cast<uint64_t>(Config::cudaBlockSize) * kStride, numKmers - blockStartKmer);
 
     const bool blockAllValid = prepareSequenceHashTiles<Config>(
         input.sequence.data(), blockStartKmer, blockKmers, sequenceTile
     );
 
-    if (!inRange) {
+    const uint64_t threadOffset = static_cast<uint64_t>(threadIdx.x) * kStride;
+    const uint64_t firstLocalIdx = threadOffset;
+    const bool hasAnyKmer = firstLocalIdx < blockKmers;
+
+    if (!hasAnyKmer) {
         return;
     }
 
-    const uint64_t kmerIndex = blockStartKmer + localKmerIndex;
+    // Per-k-mer validity tracking when the tile contains invalid bases.
+    bool kmerValid[kStride];
+#pragma unroll
+    for (uint32_t s = 0; s < kStride; ++s) {
+        kmerValid[s] = true;
+    }
 
     if (!blockAllValid) {
-        bool kmerValid = true;
-        _Pragma("unroll")
-        for (uint64_t i = 0; i < Config::k; ++i) {
-            if (sequenceTile[localKmerIndex + i] > 3) {
-                kmerValid = false;
-                break;
+#pragma unroll
+        for (uint32_t s = 0; s < kStride; ++s) {
+            const uint64_t localIdx = threadOffset + s;
+            if (localIdx >= blockKmers) {
+                kmerValid[s] = false;
+                continue;
+            }
+            bool valid = true;
+#pragma unroll
+            for (uint64_t i = 0; i < Config::k; ++i) {
+                if (sequenceTile[localIdx + i] > 3) {
+                    valid = false;
+                    break;
+                }
+            }
+            kmerValid[s] = valid;
+        }
+    }
+
+    // Find the first valid k-mer to start packing; earlier invalid kmers are written as 0.
+    int firstValidPos = -1;
+#pragma unroll
+    for (uint32_t s = 0; s < kStride; ++s) {
+        if (kmerValid[s]) {
+            firstValidPos = static_cast<int>(s);
+            break;
+        }
+    }
+
+    if (firstValidPos < 0) {
+        for (uint32_t s = 0; s < kStride; ++s) {
+            const uint64_t kmerIndex = blockStartKmer + threadOffset + s;
+            if (kmerIndex < numKmers) {
+                output[kmerIndex] = 0;
             }
         }
-        if (!kmerValid) {
-            output[kmerIndex] = 0;
-            return;
-        }
-    }
-
-    uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex, smemSeeds);
-    uint64_t minimizerHash = h_m;
-    _Pragma("unroll 1")
-    for (uint64_t offset = 1; offset < Config::minimizerSpan; ++offset) {
-        h_m = nthash::rollHash<Config::m>(
-            h_m,
-            sequenceTile[localKmerIndex + offset - 1],
-            sequenceTile[localKmerIndex + offset - 1 + Config::m],
-            smemSeeds,
-            smemRolledM
-        );
-        minimizerHash = min(minimizerHash, h_m);
-    }
-
-    typename Config::WordType w[4] = {};
-    loadShardWords4<Config>(shards.data(), minimizerHash & (shards.size() - 1), w);
-
-    uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex, smemSeeds);
-    bool present = true;
-    if (!Filter<Config>::Shard::sectorizedContainsHash(w, h_s)) {
-        present = false;
-    } else {
-        _Pragma("unroll 1")
-        for (uint64_t smerOffset = 1; smerOffset < Config::findereSpan; ++smerOffset) {
-            h_s = nthash::rollHash<Config::s>(
-                h_s,
-                sequenceTile[localKmerIndex + smerOffset - 1],
-                sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
-                smemSeeds,
-                smemRolledS
-            );
-            if (!Filter<Config>::Shard::sectorizedContainsHash(w, h_s)) {
-                present = false;
-                break;
-            }
-        }
-    }
-    output[kmerIndex] = static_cast<uint8_t>(present);
-}
-
-template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 3) containsPackedKmersKernel(
-    PackedKmerInput<Config> input,
-    device_span<const typename Filter<Config>::Shard> shards,
-    device_span<uint8_t> output
-) {
-    const uint64_t kmerIndex = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (kmerIndex >= input.kmers.size()) {
         return;
     }
 
-    const uint64_t packedKmer = input.kmers[kmerIndex];
-    const uint64_t minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
+    // Pack the first valid k-mer from the shared tile.
+    uint64_t packedKmer = packKmerFromTile<Config::k>(sequenceTile, threadOffset + firstValidPos);
 
-    typename Config::WordType w[4] = {};
-    loadShardWords4<Config>(shards.data(), minimizerHash & (shards.size() - 1), w);
+    for (uint32_t s = 0; s < kStride; ++s) {
+        const uint64_t localIdx = threadOffset + s;
+        if (localIdx >= blockKmers) {
+            break;
+        }
 
-    const bool present = sectorizedContainsPackedKmer<Config>(packedKmer, w);
-    output[kmerIndex] = static_cast<uint8_t>(present);
+        const uint64_t kmerIndex = blockStartKmer + localIdx;
+
+        if (!kmerValid[s]) {
+            output[kmerIndex] = 0;
+            continue;
+        }
+
+        if (s > static_cast<uint32_t>(firstValidPos)) {
+            packedKmer =
+                advancePackedKmer<Config::k>(packedKmer, sequenceTile[localIdx + Config::k - 1]);
+        }
+
+        const uint64_t minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
+
+        // Warp-level shard sharing.
+        const uint32_t shardIdx = static_cast<uint32_t>(minimizerHash & (shards.size() - 1));
+        const uint32_t peers = __match_any_sync(0xFFFFFFFFu, shardIdx);
+        const int leader = __ffs(static_cast<int>(peers)) - 1;
+
+        typename Config::WordType w[4] = {};
+        if (static_cast<int>(threadIdx.x & 31u) == leader) {
+            loadShardWords4Cached<Config>(shards.data(), shardIdx, w);
+        }
+        w[0] = __shfl_sync(peers, w[0], leader);
+        w[1] = __shfl_sync(peers, w[1], leader);
+        w[2] = __shfl_sync(peers, w[2], leader);
+        w[3] = __shfl_sync(peers, w[3], leader);
+
+        const bool present = sectorizedContainsPackedKmerFused<Config>(packedKmer, w);
+        output[kmerIndex] = static_cast<uint8_t>(present);
+    }
 }
 
 template <typename Config>
@@ -972,17 +878,12 @@ __global__ void insertSequenceKmersKernel(
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
-    __shared__ nthash::SeedTable smemSeeds;
-    __shared__ nthash::SeedTable smemRolledM;
-    __shared__ nthash::SeedTable smemRolledS;
 
     const uint64_t numKmers = input.kmerCount();
     const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
     if (blockStartKmer >= numKmers) {
         return;
     }
-
-    nthash::initSeedTables<Config::m, Config::s>(smemSeeds, smemRolledM, smemRolledS);
 
     const uint64_t blockKmers =
         min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
@@ -1016,33 +917,16 @@ __global__ void insertSequenceKmersKernel(
     typename Config::WordType wordMask3 = 0;
 
     if (active) {
-        uint64_t h_m = nthash::baseHash<Config::m>(sequenceTile, localKmerIndex, smemSeeds);
-        minimizerHash = h_m;
-        _Pragma("unroll 1")
-        for (uint64_t offset = 1; offset < Config::minimizerSpan; ++offset) {
-            h_m = nthash::rollHash<Config::m>(
-                h_m,
-                sequenceTile[localKmerIndex + offset - 1],
-                sequenceTile[localKmerIndex + offset - 1 + Config::m],
-                smemSeeds,
-                smemRolledM
-            );
-            minimizerHash = min(minimizerHash, h_m);
-        }
+        const uint64_t packedKmer = packKmerFromTile<Config::k>(sequenceTile, localKmerIndex);
+        minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
 
-        uint64_t h_s = nthash::baseHash<Config::s>(sequenceTile, localKmerIndex, smemSeeds);
+        uint64_t h_s = packedKmerSmerHash<Config>(packedKmer, 0);
         Filter<Config>::Shard::sectorizedHashToMasks(
             h_s, wordMask0, wordMask1, wordMask2, wordMask3
         );
-        _Pragma("unroll 1")
+        _Pragma("unroll")
         for (uint64_t smerOffset = 1; smerOffset < Config::findereSpan; ++smerOffset) {
-            h_s = nthash::rollHash<Config::s>(
-                h_s,
-                sequenceTile[localKmerIndex + smerOffset - 1],
-                sequenceTile[localKmerIndex + smerOffset - 1 + Config::s],
-                smemSeeds,
-                smemRolledS
-            );
+            h_s = packedKmerSmerHash<Config>(packedKmer, smerOffset);
             Filter<Config>::Shard::sectorizedHashToMasks(
                 h_s, wordMask0, wordMask1, wordMask2, wordMask3
             );
@@ -1075,51 +959,6 @@ __global__ void insertSequenceKmersKernel(
         }
         if (wordMask3 != 0) {
             atomicOrWord(&shard.words[3], wordMask3);
-        }
-    }
-}
-
-template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 4) insertPackedKmersKernel(
-    PackedKmerInput<Config> input,
-    device_span<typename Filter<Config>::Shard> shards
-) {
-    using WordType = typename Config::WordType;
-
-    auto block = cg::this_thread_block();
-    auto tile = cg::tiled_partition<Config::insertGroupSize>(block);
-
-    const uint64_t kmerIndex = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const auto inRange = static_cast<uint32_t>(kmerIndex < input.kmers.size());
-
-    uint64_t packedKmer = 0;
-    uint64_t minimizerHash = 0;
-    if (inRange) {
-        packedKmer = input.kmers[kmerIndex];
-        minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
-    }
-
-    const uint32_t lane = tile.thread_rank();
-
-    _Pragma("unroll 1")
-    for (uint32_t src = 0; src < Config::insertGroupSize; ++src) {
-        const uint32_t srcActive = tile.shfl(inRange, src);
-        const uint64_t srcMinHash = tile.shfl(minimizerHash, src);
-        const uint64_t srcPackedKmer = tile.shfl(packedKmer, src);
-
-        WordType laneMask = 0;
-        _Pragma("unroll 1")
-        for (uint64_t s = 0; s < Config::findereSpan; ++s) {
-            uint64_t smerHash = 0;
-            if (lane == 0) {
-                smerHash = packedKmerSmerHash<Config>(srcPackedKmer, s);
-            }
-            smerHash = tile.shfl(smerHash, 0);
-            laneMask |= Filter<Config>::Shard::sectorizedHashToMask(smerHash, lane);
-        }
-
-        if (srcActive && laneMask != 0) {
-            atomicOrWord(&shards[srcMinHash & (shards.size() - 1)].words[lane], laneMask);
         }
     }
 }

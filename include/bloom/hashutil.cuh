@@ -169,11 +169,8 @@ __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
 namespace bloom::detail {
 
 constexpr __host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
-    key ^= key >> 30;
-    key *= 0xbf58476d1ce4e5b9ULL;
-    key ^= key >> 27;
-    key *= 0x94d049bb133111ebULL;
-    key ^= key >> 31;
+    key *= 0x9e3779b97f4a7c15ULL;
+    key ^= key >> 33;
     return key;
 }
 
@@ -206,9 +203,8 @@ struct SeedTable {
 /// Thread-0 writes seeds + rolled-seed LUTs into shared memory.
 /// Caller must barrier (e.g. __syncthreads) before reading.
 template <uint64_t W_m, uint64_t W_s>
-__device__ __forceinline__ void initSeedTables(
-    SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS
-) {
+__device__ __forceinline__ void
+initSeedTables(SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS) {
     if (threadIdx.x == 0) {
         seeds.v[0] = SEED_A;
         seeds.v[1] = SEED_C;
@@ -226,10 +222,8 @@ __device__ __forceinline__ void initSeedTables(
 }
 
 template <uint64_t WindowLength>
-__device__ __forceinline__ uint64_t baseHash(
-    const uint8_t* encodedBases, uint64_t start,
-    const SeedTable& seeds
-) {
+__device__ __forceinline__ uint64_t
+baseHash(const uint8_t* encodedBases, uint64_t start, const SeedTable& seeds) {
     uint64_t h = 0;
     _Pragma("unroll")
     for (uint64_t i = 0; i < WindowLength; ++i) {
@@ -240,8 +234,11 @@ __device__ __forceinline__ uint64_t baseHash(
 
 template <uint64_t WindowLength>
 __device__ __forceinline__ uint64_t rollHash(
-    uint64_t h, uint8_t baseOut, uint8_t baseIn,
-    const SeedTable& seeds, const SeedTable& rolledSeeds
+    uint64_t h,
+    uint8_t baseOut,
+    uint8_t baseIn,
+    const SeedTable& seeds,
+    const SeedTable& rolledSeeds
 ) {
     return rol1(h) ^ seeds.v[baseIn & 0x3u] ^ rolledSeeds.v[baseOut & 0x3u];
 }

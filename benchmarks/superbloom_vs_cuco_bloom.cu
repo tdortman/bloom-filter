@@ -336,21 +336,12 @@ void runSuperBloomInsertBenchmark(Fixture& fixture, bm::State& state) {
         CUDA_CALL(cudaDeviceSynchronize());
 
         fixture.timer.start();
-        if (g_inputMode == InputMode::Packed) {
-            benchmark::DoNotOptimize(fixture.filter->insertPackedKmersDevice(
-                bloom::device_span<const uint64_t>{
-                    thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
-                    fixture.numKmers
-                }
-            ));
-        } else {
-            benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
-                bloom::device_span<const char>{
-                    thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
-                    fixture.sequenceLength
-                }
-            ));
-        }
+        benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                fixture.sequenceLength
+            }
+        ));
         const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
     }
@@ -360,46 +351,25 @@ void runSuperBloomInsertBenchmark(Fixture& fixture, bm::State& state) {
 template <typename Fixture>
 void runSuperBloomQueryBenchmark(Fixture& fixture, bm::State& state) {
     fixture.filter->clear();
-    if (g_inputMode == InputMode::Packed) {
-        benchmark::DoNotOptimize(fixture.filter->insertPackedKmersDevice(
-            bloom::device_span<const uint64_t>{
-                thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
-                fixture.numKmers
-            }
-        ));
-    } else {
-        benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
-            bloom::device_span<const char>{
-                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
-                fixture.sequenceLength
-            }
-        ));
-    }
+    benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
+        bloom::device_span<const char>{
+            thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+            fixture.sequenceLength
+        }
+    ));
     CUDA_CALL(cudaDeviceSynchronize());
 
     for (auto _ : state) {
         fixture.timer.start();
-        if (g_inputMode == InputMode::Packed) {
-            fixture.filter->containsPackedKmersDevice(
-                bloom::device_span<const uint64_t>{
-                    thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data()),
-                    fixture.numKmers
-                },
-                bloom::device_span<uint8_t>{
-                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
-                }
-            );
-        } else {
-            fixture.filter->containsSequenceDevice(
-                bloom::device_span<const char>{
-                    thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
-                    fixture.sequenceLength
-                },
-                bloom::device_span<uint8_t>{
-                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
-                }
-            );
-        }
+        fixture.filter->containsSequenceDevice(
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                fixture.sequenceLength
+            },
+            bloom::device_span<uint8_t>{
+                thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+            }
+        );
         const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
         benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
@@ -412,47 +382,26 @@ void runSuperBloomFprBenchmark(Fixture& fixture, bm::State& state) {
     fixture.benchData->ensureFprData();
 
     fixture.filter->clear();
-    if (g_inputMode == InputMode::Packed) {
-        benchmark::DoNotOptimize(fixture.filter->insertPackedKmersDevice(
-            bloom::device_span<const uint64_t>{
-                thrust::raw_pointer_cast(fixture.benchData->d_fprInsertPackedKmers.data()),
-                fixture.numKmers
-            }
-        ));
-    } else {
-        benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
-            bloom::device_span<const char>{
-                thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
-                fixture.sequenceLength
-            }
-        ));
-    }
+    benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
+        bloom::device_span<const char>{
+            thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
+            fixture.sequenceLength
+        }
+    ));
     CUDA_CALL(cudaDeviceSynchronize());
 
     uint64_t falsePositives = 0;
     for (auto _ : state) {
         fixture.timer.start();
-        if (g_inputMode == InputMode::Packed) {
-            fixture.filter->containsPackedKmersDevice(
-                bloom::device_span<const uint64_t>{
-                    thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapPackedKmers.data()),
-                    fixture.numKmers
-                },
-                bloom::device_span<uint8_t>{
-                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
-                }
-            );
-        } else {
-            fixture.filter->containsSequenceDevice(
-                bloom::device_span<const char>{
-                    thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
-                    fixture.sequenceLength
-                },
-                bloom::device_span<uint8_t>{
-                    thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
-                }
-            );
-        }
+        fixture.filter->containsSequenceDevice(
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
+                fixture.sequenceLength
+            },
+            bloom::device_span<uint8_t>{
+                thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+            }
+        );
         const double elapsed = fixture.timer.elapsed();
         state.SetIterationTime(elapsed);
         benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));

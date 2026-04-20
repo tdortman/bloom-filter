@@ -97,6 +97,17 @@ __device__ __forceinline__ void load256BitGlobalNC(
 #endif
 
 /**
+ * @brief Loads 128 bits from global memory using the non-coherent cache path.
+ *
+ * Uses two ld.global.nc.v2.u64 instructions for uint64_t, or one
+ * ld.global.nc.v4.u32 for uint32_t.
+ */
+__device__ __forceinline__ void
+load128BitGlobalNC(const uint64_t* ptr, uint64_t& out0, uint64_t& out1) {
+    asm volatile("ld.global.nc.v2.u64 {%0, %1}, [%2];" : "=l"(out0), "=l"(out1) : "l"(ptr));
+}
+
+/**
  * @brief OR-reduce a uint64_t across the lanes in a peer mask.
  *
  * On sm_80+ uses __reduce_or_sync, on older architectures falls back
