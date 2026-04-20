@@ -51,10 +51,12 @@ constexpr uint64_t PRIME64_3 = 1609587929392839161ULL;
 constexpr uint64_t PRIME64_4 = 9650029242287828579ULL;
 constexpr uint64_t PRIME64_5 = 2870177450012600261ULL;
 
+/// @brief Rotates @p x left by @p r bits.
 constexpr __host__ __device__ __forceinline__ uint64_t rotl64(uint64_t x, int8_t r) {
     return cuda::std::rotl(x, static_cast<int>(r));
 }
 
+/// @brief Loads a chunk of type @p T from @p data at byte offset @c index*sizeof(T).
 template <typename T>
 __host__ __device__ __forceinline__ T load_chunk(const uint8_t* data, uint64_t index) {
     T chunk;
@@ -62,6 +64,7 @@ __host__ __device__ __forceinline__ T load_chunk(const uint8_t* data, uint64_t i
     return chunk;
 }
 
+/// @brief Applies the xxHash-64 final mixing (avalanche) step.
 constexpr __host__ __device__ __forceinline__ uint64_t finalize(uint64_t h) {
     h ^= h >> 33;
     h *= PRIME64_2;
@@ -71,6 +74,14 @@ constexpr __host__ __device__ __forceinline__ uint64_t finalize(uint64_t h) {
     return h;
 }
 
+/**
+ * @brief Computes the xxHash-64 digest of a value.
+ *
+ * @tparam T     Type of the value; hashed as raw bytes.
+ * @param  key   Value to hash.
+ * @param  seed  Optional seed (default 0).
+ * @return 64-bit hash digest.
+ */
 template <typename T>
 __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
     const auto* bytes = reinterpret_cast<const uint8_t*>(&key);
@@ -168,12 +179,30 @@ __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
 
 namespace bloom::detail {
 
+/**
+ * @brief Fast 64-bit integer hash (non-cryptographic).
+ *
+ * One multiplicative step followed by an xorshift. Used to hash s-mer packed
+ * representations for Bloom bit-position selection.
+ *
+ * @param key Input value.
+ * @return Hashed value.
+ */
 constexpr __host__ __device__ __forceinline__ uint64_t hash64(uint64_t key) {
     key *= 0x9e3779b97f4a7c15ULL;
     key ^= key >> 33;
     return key;
 }
 
+/**
+ * @brief Fast 64-bit hash sufficient for uniform minimizer selection.
+ *
+ * A single Knuth multiplicative step — provides enough uniformity for
+ * shard selection without the full avalanche quality of @ref hash64.
+ *
+ * @param key Packed m-mer input.
+ * @return Hash value used to select the minimum (minimizer).
+ */
 // sufficient for minimizer (shard) selection where only uniformity matters,
 // not full avalanche quality.
 constexpr __host__ __device__ __forceinline__ uint64_t minimizerHash64(uint64_t key) {
@@ -182,20 +211,35 @@ constexpr __host__ __device__ __forceinline__ uint64_t minimizerHash64(uint64_t 
 
 namespace nthash {
 
+/// @brief ntHash seed for adenine (A).
 constexpr uint64_t SEED_A = 0x3c8bfbb395c60474ULL;
+/// @brief ntHash seed for cytosine (C).
 constexpr uint64_t SEED_C = 0x3193c18562a02b4cULL;
+/// @brief ntHash seed for guanine (G).
 constexpr uint64_t SEED_G = 0x20323ed082572324ULL;
+/// @brief ntHash seed for thymine (T).
 constexpr uint64_t SEED_T = 0x295549f54be24456ULL;
 
+/// @brief Rotates @p x left by one bit.
 constexpr __host__ __device__ __forceinline__ uint64_t rol1(uint64_t x) {
     return cuda::std::rotl(x, 1);
 }
 
+/**
+ * @brief Returns @p x rotated left by @p D bits (compile-time rotation amount).
+ *
+ * @tparam D Rotation amount.
+ */
 template <uint64_t D>
 constexpr uint64_t rolnValue(uint64_t x) {
     return cuda::std::rotl(x, static_cast<int>(D % 64));
 }
 
+/**
+ * @brief Four-element seed lookup table for ntHash rolling hash.
+ *
+ * Entries are indexed by the 2-bit base encoding (A=0, C=1, G=2, T=3).
+ */
 struct SeedTable {
     uint64_t v[4];
 };
@@ -221,6 +265,15 @@ initSeedTables(SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS) {
     }
 }
 
+/**
+ * @brief Computes the initial ntHash value for a fixed-length window of pre-encoded bases.
+ *
+ * @tparam WindowLength  Window size in bases.
+ * @param  encodedBases  Pre-encoded base array.
+ * @param  start         Start position in @p encodedBases.
+ * @param  seeds         Seed lookup table.
+ * @return ntHash of the window.
+ */
 template <uint64_t WindowLength>
 __device__ __forceinline__ uint64_t
 baseHash(const uint8_t* encodedBases, uint64_t start, const SeedTable& seeds) {
@@ -232,6 +285,20 @@ baseHash(const uint8_t* encodedBases, uint64_t start, const SeedTable& seeds) {
     return h;
 }
 
+/**
+ * @brief Incrementally updates an ntHash by one base step.
+ *
+ * Slides the window forward: removes @p baseOut from the front and adds @p
+ * baseIn at the back.
+ *
+ * @tparam WindowLength  Window size in bases.
+ * @param  h             Current hash value.
+ * @param  baseOut       Pre-encoded base leaving the window (front).
+ * @param  baseIn        Pre-encoded base entering the window (back).
+ * @param  seeds         Seed lookup table.
+ * @param  rolledSeeds   Seed table pre-rotated by @p WindowLength positions.
+ * @return Updated ntHash.
+ */
 template <uint64_t WindowLength>
 __device__ __forceinline__ uint64_t rollHash(
     uint64_t h,

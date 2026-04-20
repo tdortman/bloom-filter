@@ -10,12 +10,14 @@
 
 namespace bloom {
 
+/// @brief Summary statistics returned by Filter insert operations on FASTX input.
 struct FastxInsertReport {
     uint64_t recordsIndexed{};
     uint64_t indexedBases{};
     uint64_t insertedKmers{};
 };
 
+/// @brief Summary statistics returned by Filter query operations on FASTX input.
 struct FastxQueryReport {
     uint64_t recordsQueried{};
     uint64_t queriedBases{};
@@ -25,22 +27,32 @@ struct FastxQueryReport {
 
 namespace detail {
 
+/// @brief Detected file format for a FASTA/FASTQ stream.
 enum class FastxFormat : uint8_t {
     unknown,
     fasta,
     fastq,
 };
 
+/// @brief A single sequence record extracted from a FASTA/FASTQ stream.
 struct FastxRecord {
     std::string sequence;
 };
 
+/// @brief Removes a trailing '\r' from @p line if present (Windows line endings).
 inline void trimTrailingCarriageReturn(std::string& line) {
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
     }
 }
 
+/**
+ * @brief Streaming FASTA/FASTQ parser.
+ *
+ * Reads one record at a time via @ref nextRecord. Supports both FASTA and
+ * FASTQ formats, auto-detected from the first header character. Mixed
+ * formats within a single stream are rejected with an exception.
+ */
 class FastxReader {
    public:
     explicit FastxReader(std::istream& input, std::string_view sourceName = "<stream>")
@@ -178,6 +190,13 @@ class FastxReader {
     }
 };
 
+/**
+ * @brief Opens a FASTA/FASTQ file for reading.
+ *
+ * @param path  File path.
+ * @return Open input file stream.
+ * @throws std::runtime_error if the file cannot be opened.
+ */
 inline std::ifstream openFastxFile(std::string_view path) {
     std::ifstream input{std::string(path)};
     if (!input.is_open()) {

@@ -28,6 +28,21 @@
 
 namespace bloom {
 
+/**
+ * @brief Compile-time configuration for a bloom::Filter.
+ *
+ * All filter behaviour (k-mer length, minimizer width, s-mer width, hash
+ * count, CUDA block size, and word type) is encoded in this struct so that
+ * separate configurations produce completely independent Filter types with
+ * zero run-time overhead.
+ *
+ * @tparam K_             k-mer length (1-32).
+ * @tparam S_             s-mer width used as the Bloom hash seed (1-k).
+ * @tparam M_             minimizer width used for shard selection (1-k).
+ * @tparam HashCount_     number of independent Bloom hash functions (1-16).
+ * @tparam CudaBlockSize_ CUDA threads per block (multiple of 32, default 256).
+ * @tparam WordType_      backing integer for filter bits (uint32_t or uint64_t).
+ */
 template <
     uint16_t K_,
     uint16_t S_,
@@ -127,7 +142,16 @@ __global__ void insertSequenceKmersKernel(
     device_span<typename Filter<Config>::Shard> shards
 );
 
+/// @brief Sentinel hash value indicating "no valid minimizer found".
 inline constexpr uint64_t kInvalidHash = std::numeric_limits<uint64_t>::max();
+/**
+ * @brief Compile-time golden-ratio-derived multiplicative salt constants.
+ *
+ * Used as per-hash-index mixing constants in the sectorised Bloom hash scheme.
+ * Index must be in [0, 15].
+ *
+ * @tparam Index Salt index.
+ */
 template <uint64_t Index>
 struct SaltLiteral;
 
@@ -196,18 +220,32 @@ struct SaltLiteral<15> {
     static constexpr uint64_t value = 0xBBE0'56FD'ADE1'4B91ULL;
 };
 
+/**
+ * @brief Returns the multiplicative salt constant for hash function @p Index.
+ *
+ * @tparam Index Salt index in [0, 15].
+ * @return Salt value.
+ */
 template <uint64_t Index>
 [[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t multiplicativeSaltLiteral() {
     static_assert(Index < 16, "Salt index out of range");
     return SaltLiteral<Index>::value;
 }
 
+/// @brief Implementation helper for forEachHashIndex (fold-expression over an index sequence).
 template <typename Config, typename Fn, uint64_t... HashIndices>
 __host__ __device__ __forceinline__ void
 forEachHashIndexImpl(Fn&& fn, std::index_sequence<HashIndices...>) {
     (fn(std::integral_constant<uint64_t, HashIndices>{}), ...);
 }
 
+/**
+ * @brief Invokes @p fn for each hash index in [0, Config::hashCount) at compile time.
+ *
+ * @tparam Config  Filter configuration.
+ * @tparam Fn      Callable with signature @c void(std::integral_constant<uint64_t, I>).
+ * @param  fn      Callable to invoke for each index.
+ */
 template <typename Config, typename Fn>
 __host__ __device__ __forceinline__ void forEachHashIndex(Fn&& fn) {
     forEachHashIndexImpl<Config>(
@@ -215,6 +253,14 @@ __host__ __device__ __forceinline__ void forEachHashIndex(Fn&& fn) {
     );
 }
 
+/**
+ * @brief Encodes a nucleotide character to a 2-bit value.
+ *
+ * Maps A/a→0, C/c→1, G/g→2, T/t→3. Any other character returns 0xFF.
+ *
+ * @param base  ASCII nucleotide character.
+ * @return 2-bit encoding, or 0xFF for invalid input.
+ */
 constexpr __host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
     switch (base) {
         case 'A':
@@ -234,6 +280,15 @@ constexpr __host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
     }
 }
 
+/**
+ * @brief Encodes @p Length already-encoded bases into a packed 2-bit integer.
+ *
+ * @tparam Length  Window size in bases.
+ * @param  encodedSequence  Pre-encoded base array.
+ * @param  start            Start position.
+ * @param  packed           Output packed representation.
+ * @return @c true if all bases in the window are valid (encoded value \<= 3).
+ */
 template <uint64_t Length>
 __device__ __forceinline__ bool
 encodeWindow(const uint8_t* encodedSequence, uint64_t start, uint64_t& packed) {
@@ -248,6 +303,15 @@ encodeWindow(const uint8_t* encodedSequence, uint64_t start, uint64_t& packed) {
     return invalid == 0;
 }
 
+/**
+ * @brief Packs @p Length pre-encoded bases into a 2-bit integer without validity checking.
+ *
+ * @tparam Length       Window size in bases.
+ * @tparam EncodedType  Element type of @p sequence.
+ * @param  sequence     Pre-encoded base array.
+ * @param  start        Start index.
+ * @return Packed 2-bit representation.
+ */
 template <uint64_t Length, typename EncodedType>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 packEncodedWindowUnchecked(const EncodedType* sequence, uint64_t start) {
@@ -260,6 +324,13 @@ packEncodedWindowUnchecked(const EncodedType* sequence, uint64_t start) {
     return packed;
 }
 
+/**
+ * @brief Returns a bitmask covering @p Length packed 2-bit bases.
+ *
+ * Returns @c UINT64_MAX when @p Length >= 32.
+ *
+ * @tparam Length Number of bases.
+ */
 template <uint64_t Length>
 [[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t packedWindowMask() {
     if constexpr (Length >= 32) {
@@ -269,6 +340,18 @@ template <uint64_t Length>
     }
 }
 
+/**
+ * @brief Extracts a packed sub-window from a packed k-mer.
+ *
+ * Extracts @p WindowLength consecutive bases starting at @p start from a
+ * packed k-mer of length @p K (MSB = first base).
+ *
+ * @tparam WindowLength  Length of the sub-window to extract.
+ * @tparam K             Length of the full k-mer.
+ * @param  packedKmer    Packed k-mer (MSB = first base).
+ * @param  start         Zero-based start position.
+ * @return Packed sub-window.
+ */
 template <uint64_t WindowLength, uint64_t K>
 [[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t
 extractPackedSubwindow(uint64_t packedKmer, uint64_t start) {
@@ -276,6 +359,16 @@ extractPackedSubwindow(uint64_t packedKmer, uint64_t start) {
     return (packedKmer >> (2 * (K - (start + WindowLength)))) & packedWindowMask<WindowLength>();
 }
 
+/**
+ * @brief Atomically ORs @p value into the device word at @p ptr.
+ *
+ * Dispatches to @c atomicOr with the appropriate reinterpret_cast depending
+ * on whether @p WordType is uint32_t or uint64_t.
+ *
+ * @tparam WordType  uint32_t or uint64_t.
+ * @param  ptr       Target device word.
+ * @param  value     Value to OR in.
+ */
 template <typename WordType>
 __device__ __forceinline__ void atomicOrWord(WordType* ptr, WordType value) {
     if constexpr (std::is_same_v<WordType, uint64_t>) {
@@ -289,11 +382,32 @@ __device__ __forceinline__ void atomicOrWord(WordType* ptr, WordType value) {
 
 }  // namespace detail
 
+/**
+ * @brief GPU-accelerated sectorized Bloom filter.
+ *
+ * Stores an in-device Bloom filter divided into numShards 256-bit shards.
+ * Each shard is independently addressed by a minimizer-derived hash, and
+ * bits within a shard are updated/tested by a set of s-mer-derived hashes.
+ *
+ * The filter is **not copyable** (device memory ownership). Move construction
+ * and assignment are supported.
+ *
+ * @tparam Config A @ref bloom::Config specialisation.
+ */
 template <typename Config>
 class Filter {
    public:
     using WordType = typename Config::WordType;
 
+    /**
+     * @brief One 256-bit filter block stored as an array of Config::blockWordCount words.
+     *
+     * Each shard is addressed as a unit: a minimizer hash selects the shard,
+     * and the s-mer-derived hashes set/test bits within it.
+     *
+     * The struct is 32-byte aligned to enable vectorised loads via
+     * @ref bloom::detail::load256BitGlobalNC.
+     */
     struct alignas(32) Shard {
         static constexpr uint64_t wordCount = Config::blockWordCount;
         static constexpr uint64_t wordBits = Config::wordBits;
@@ -301,6 +415,16 @@ class Filter {
 
         WordType words[wordCount];
 
+        /**
+         * @brief Maps a base hash to a bit position within word sector @p HashIndex.
+         *
+         * Uses bit-slicing when the hash has enough entropy per slice; otherwise
+         * applies a multiplicative salt to redistribute bits.
+         *
+         * @tparam HashIndex  Hash function index in [0, Config::hashCount).
+         * @param  baseHash   The s-mer-derived hash value.
+         * @return Bit position (0-based) within the word at sector @p HashIndex % blockWordCount.
+         */
         template <uint64_t HashIndex>
         [[nodiscard]] constexpr __host__ __device__ static uint64_t sectorizedBitAddress(
             uint64_t baseHash
@@ -318,6 +442,18 @@ class Filter {
             }
         }
 
+        /**
+         * @brief Computes four word bitmasks from a single base hash.
+         *
+         * Iterates over all Config::hashCount hash functions and ORs the
+         * corresponding bit into one of the four output word masks (sectors 0-3).
+         *
+         * @param baseHash  s-mer-derived hash value.
+         * @param mask0     Accumulated bits for word 0 (in/out).
+         * @param mask1     Accumulated bits for word 1 (in/out).
+         * @param mask2     Accumulated bits for word 2 (in/out).
+         * @param mask3     Accumulated bits for word 3 (in/out).
+         */
         __device__ __forceinline__ static void sectorizedHashToMasks(
             uint64_t baseHash,
             WordType& mask0,
@@ -354,6 +490,14 @@ class Filter {
         "Fused path expects horizontal insert mapping across shard words"
     );
 
+    /**
+     * @brief Constructs a Filter with at least @p requestedFilterBits bits of storage.
+     *
+     * The actual allocated capacity is rounded up to the next power-of-two number of
+     * shards.
+     *
+     * @param requestedFilterBits Desired filter capacity in bits.
+     */
     explicit Filter(uint64_t requestedFilterBits)
         : numShards_(
               cuda::std::bit_ceil(
@@ -371,6 +515,17 @@ class Filter {
     Filter& operator=(Filter&&) = default;
     ~Filter() = default;
 
+    /**
+     * @brief Inserts all valid k-mers from a host-resident sequence.
+     *
+     * Copies the sequence to device, launches the insert kernel, and synchronises
+     * before returning. K-mers containing characters outside {A,C,G,T,a,c,g,t}
+     * are skipped.
+     *
+     * @param sequence  Raw nucleotide sequence.
+     * @param stream    CUDA stream to use (default: null stream).
+     * @return Number of k-mers attempted (sequences shorter than k yield 0).
+     */
     [[nodiscard]] uint64_t
     insertSequence(std::string_view sequence, cuda::stream_ref stream = cudaStream_t{}) {
         if (sequence.size() < Config::k) {
@@ -387,6 +542,16 @@ class Filter {
         return totalKmers;
     }
 
+    /**
+     * @brief Async insert of k-mers from a device-resident sequence.
+     *
+     * Does **not** synchronise the stream, the caller is responsible for ordering
+     * relative to downstream operations.
+     *
+     * @param d_sequence  Device-resident nucleotide sequence.
+     * @param stream      CUDA stream to use.
+     * @return Number of k-mers attempted.
+     */
     [[nodiscard]] uint64_t insertSequenceDevice(
         device_span<const char> d_sequence,
         cuda::stream_ref stream = cudaStream_t{}
@@ -400,17 +565,41 @@ class Filter {
         return totalKmers;
     }
 
+    /**
+     * @brief Inserts all k-mers from a FASTA/FASTQ input stream.
+     *
+     * @param input   Input stream containing FASTA or FASTQ records.
+     * @param stream  CUDA stream to use.
+     * @return Report summarising records indexed, bases processed, and k-mers inserted.
+     */
     [[nodiscard]] FastxInsertReport
     insertFastx(std::istream& input, cuda::stream_ref stream = cudaStream_t{}) {
         return insertFastxStream(input, "<stream>", stream);
     }
 
+    /**
+     * @brief Inserts all k-mers from a FASTA/FASTQ file.
+     *
+     * @param path    Path to the FASTA/FASTQ file.
+     * @param stream  CUDA stream to use.
+     * @return Report summarising records indexed, bases processed, and k-mers inserted.
+     */
     [[nodiscard]] FastxInsertReport
     insertFastxFile(std::string_view path, cuda::stream_ref stream = cudaStream_t{}) {
         auto input = detail::openFastxFile(path);
         return insertFastxStream(input, path, stream);
     }
 
+    /**
+     * @brief Async query of k-mers from a device-resident sequence.
+     *
+     * Does **not** synchronise the stream. Results are written to @p d_output
+     * (one byte per k-mer: 1 = present, 0 = absent).
+     *
+     * @param d_sequence  Device-resident nucleotide sequence.
+     * @param d_output    Per-k-mer result buffer (must hold kmerCount() bytes).
+     * @param stream      CUDA stream to use.
+     */
     void containsSequenceDevice(
         device_span<const char> d_sequence,
         device_span<uint8_t> d_output,
@@ -423,6 +612,17 @@ class Filter {
         launchContainsSequence(d_sequence, d_output, stream);
     }
 
+    /**
+     * @brief Queries all valid k-mers from a host-resident sequence.
+     *
+     * Copies the sequence to device, queries, copies results back, and
+     * synchronises. The returned vector has one byte per k-mer: 1 = present,
+     * 0 = absent.
+     *
+     * @param sequence  Raw nucleotide sequence.
+     * @param stream    CUDA stream to use.
+     * @return Per-k-mer membership results (empty if sequence length < k).
+     */
     [[nodiscard]] std::vector<uint8_t>
     containsSequence(std::string_view sequence, cuda::stream_ref stream = cudaStream_t{}) const {
         if (sequence.size() < Config::k) {
@@ -450,17 +650,36 @@ class Filter {
         return output;
     }
 
+    /**
+     * @brief Queries all k-mers from a FASTA/FASTQ input stream.
+     *
+     * @param input   Input stream containing FASTA or FASTQ records.
+     * @param stream  CUDA stream to use.
+     * @return Report summarising records queried, bases, and hit counts.
+     */
     [[nodiscard]] FastxQueryReport
     queryFastx(std::istream& input, cuda::stream_ref stream = cudaStream_t{}) const {
         return queryFastxStream(input, "<stream>", stream);
     }
 
+    /**
+     * @brief Queries all k-mers from a FASTA/FASTQ file.
+     *
+     * @param path    Path to the FASTA/FASTQ file.
+     * @param stream  CUDA stream to use.
+     * @return Report summarising records queried, bases, and hit counts.
+     */
     [[nodiscard]] FastxQueryReport
     queryFastxFile(std::string_view path, cuda::stream_ref stream = cudaStream_t{}) const {
         auto input = detail::openFastxFile(path);
         return queryFastxStream(input, path, stream);
     }
 
+    /**
+     * @brief Resets all filter bits to zero and synchronises the stream.
+     *
+     * @param stream CUDA stream to use.
+     */
     void clear(cuda::stream_ref stream = cudaStream_t{}) {
         CUDA_CALL(cudaMemsetAsync(
             thrust::raw_pointer_cast(d_shards_.data()), 0, sizeBytes(), stream.get()
@@ -468,6 +687,11 @@ class Filter {
         CUDA_CALL(cudaStreamSynchronize(stream.get()));
     }
 
+    /**
+     * @brief Computes the fraction of set bits in the filter.
+     *
+     * @return Load factor in [0, 1].
+     */
     [[nodiscard]] float loadFactor() const {
         const auto* wordsBegin =
             reinterpret_cast<const WordType*>(thrust::raw_pointer_cast(d_shards_.data()));
@@ -483,14 +707,12 @@ class Filter {
         return static_cast<float>(setBits) / static_cast<float>(filterBits_);
     }
 
+    /// @brief Returns the total allocated capacity of the filter in bits.
     [[nodiscard]] uint64_t filterBits() const {
         return filterBits_;
     }
 
-    [[nodiscard]] uint64_t numBlocks() const {
-        return numShards_;
-    }
-
+    /// @brief Returns the number of shards.
     [[nodiscard]] uint64_t numShards() const {
         return numShards_;
     }
@@ -503,14 +725,12 @@ class Filter {
     mutable thrust::device_vector<char> d_sequence_;
     mutable thrust::device_vector<uint8_t> d_resultBuffer_;
 
-    [[nodiscard]] uint64_t shardCount() const {
-        return numShards_;
-    }
-
+    /// @brief Returns the total size of all shard storage in bytes.
     [[nodiscard]] uint64_t sizeBytes() const {
-        return shardCount() * sizeof(Shard);
+        return numShards() * sizeof(Shard);
     }
 
+    /// @brief Internal implementation shared by insertFastx() and insertFastxFile().
     [[nodiscard]] FastxInsertReport
     insertFastxStream(std::istream& input, std::string_view sourceName, cuda::stream_ref stream) {
         detail::FastxReader reader(input, sourceName);
@@ -525,6 +745,7 @@ class Filter {
         return report;
     }
 
+    /// @brief Internal implementation shared by queryFastx() and queryFastxFile().
     [[nodiscard]] FastxQueryReport queryFastxStream(
         std::istream& input,
         std::string_view sourceName,
@@ -545,18 +766,31 @@ class Filter {
         return report;
     }
 
+    /**
+     * @brief Grows the host-to-device sequence staging buffer if necessary.
+     * @param bases Minimum required capacity in characters.
+     */
     void ensureSequenceCapacity(uint64_t bases) const {
         if (bases > d_sequence_.size()) {
             d_sequence_.resize(bases);
         }
     }
 
+    /**
+     * @brief Grows the per-k-mer result staging buffer if necessary.
+     * @param kmers Minimum required capacity in bytes.
+     */
     void ensureResultCapacity(uint64_t kmers) const {
         if (kmers > d_resultBuffer_.size()) {
             d_resultBuffer_.resize(kmers);
         }
     }
 
+    /**
+     * @brief Copies a host-resident sequence to the device staging buffer.
+     * @param sequence Source span (host memory).
+     * @param stream   CUDA stream.
+     */
     void stageSequence(cuda::std::span<const char> sequence, cuda::stream_ref stream) const {
         ensureSequenceCapacity(sequence.size());
         CUDA_CALL(cudaMemcpyAsync(
@@ -568,6 +802,11 @@ class Filter {
         ));
     }
 
+    /**
+     * @brief Launches the insert kernel for a device-resident sequence.
+     * @param d_sequence Device-resident sequence.
+     * @param stream     CUDA stream.
+     */
     void launchInsertSequence(device_span<const char> d_sequence, cuda::stream_ref stream) {
         if (d_sequence.size() < Config::k) {
             return;
@@ -583,6 +822,12 @@ class Filter {
         CUDA_CALL(cudaGetLastError());
     }
 
+    /**
+     * @brief Launches the query kernel for a device-resident sequence.
+     * @param d_sequence Device-resident sequence.
+     * @param d_output   Per-k-mer result buffer (one byte per k-mer).
+     * @param stream     CUDA stream.
+     */
     void launchContainsSequence(
         device_span<const char> d_sequence,
         device_span<uint8_t> d_output,
@@ -604,6 +849,12 @@ class Filter {
 
 namespace detail {
 
+/**
+ * @brief Kernel input descriptor for a sequence k-mer sweep.
+ *
+ * Passed by value to both insert and query kernels; holds the device-resident
+ * sequence span and provides convenience accessors for k-mer and s-mer counts.
+ */
 template <typename Config>
 struct SequenceKmerInput {
     device_span<const char> sequence;
@@ -617,6 +868,16 @@ struct SequenceKmerInput {
     }
 };
 
+/**
+ * @brief Computes the minimizer hash for a packed k-mer.
+ *
+ * Iterates over all m-mers within the k-mer and returns the minimum
+ * hash value, which is used to select the target shard.
+ *
+ * @tparam Config     Filter configuration.
+ * @param  packedKmer 2-bit packed k-mer.
+ * @return Minimizer hash value.
+ */
 template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t packedKmerMinimizerHash(uint64_t packedKmer) {
     uint64_t minimizerHash = kInvalidHash;
@@ -629,6 +890,14 @@ template <typename Config>
     return minimizerHash;
 }
 
+/**
+ * @brief Computes the hash for the s-mer at position @p start within a packed k-mer.
+ *
+ * @tparam Config     Filter configuration.
+ * @param  packedKmer 2-bit packed k-mer.
+ * @param  start      Zero-based start position of the s-mer within the k-mer.
+ * @return Hash of the s-mer.
+ */
 template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
@@ -636,6 +905,17 @@ packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
     return detail::hash64(packedSmer);
 }
 
+/**
+ * @brief Loads all four 64-bit words of a shard into a local array.
+ *
+ * On sm_100+ issues a single 256-bit non-coherent global load, on older
+ * architectures falls back to two 128-bit loads.
+ *
+ * @tparam Config      Filter configuration.
+ * @param  shards      Pointer to the device shard array.
+ * @param  shardIndex  Index of the shard to load.
+ * @param  w           Output array of (at least) four words.
+ */
 template <typename Config>
 __device__ __forceinline__ void loadShardWords4(
     const typename Filter<Config>::Shard* shards,
@@ -650,6 +930,14 @@ __device__ __forceinline__ void loadShardWords4(
 #endif
 }
 
+/**
+ * @brief Packs @p K bases from a shared-memory tile into a 2-bit integer.
+ *
+ * @tparam K     k-mer length.
+ * @param  tile  Encoded base tile in shared memory.
+ * @param  start Start position within the tile.
+ * @return Packed 2-bit k-mer.
+ */
 template <uint64_t K>
 __device__ __forceinline__ uint64_t packKmerFromTile(const uint8_t* tile, uint64_t start) {
     uint64_t packed = 0;
@@ -660,11 +948,33 @@ __device__ __forceinline__ uint64_t packKmerFromTile(const uint8_t* tile, uint64
     return packed;
 }
 
+/**
+ * @brief Slides the packed k-mer window forward by one base.
+ *
+ * Shifts the existing packed representation left by 2 bits, inserts the
+ * new base in the least-significant position, and masks to @p K bases.
+ *
+ * @tparam K       k-mer length.
+ * @param  packed  Current packed k-mer.
+ * @param  newBase Pre-encoded new base (bits 1:0 used).
+ * @return Updated packed k-mer.
+ */
 template <uint64_t K>
 __device__ __forceinline__ uint64_t advancePackedKmer(uint64_t packed, uint8_t newBase) {
     return ((packed << 2) | static_cast<uint64_t>(newBase & 0x3u)) & packedWindowMask<K>();
 }
 
+/**
+ * @brief Tests whether a packed k-mer is present in a pre-loaded shard.
+ *
+ * Checks all s-mer hashes across the k-mer against the four shard words.
+ * Returns @c false as soon as any required bit is absent.
+ *
+ * @tparam Config     Filter configuration.
+ * @param  packedKmer 2-bit packed k-mer to query.
+ * @param  w          The four pre-loaded shard words.
+ * @return @c true if all required bits are set.
+ */
 template <typename Config>
 __device__ __forceinline__ bool
 sectorizedContainsPackedKmer(uint64_t packedKmer, const typename Filter<Config>::WordType* w) {
@@ -684,6 +994,20 @@ sectorizedContainsPackedKmer(uint64_t packedKmer, const typename Filter<Config>:
     return present;
 }
 
+/**
+ * @brief Cooperatively loads and encodes a tile of bases into shared memory.
+ *
+ * All threads in the block participate. The return value (via
+ * @c __syncthreads_count) is @c true only if every base in the tile is a
+ * valid nucleotide.
+ *
+ * @tparam Config         Filter configuration.
+ * @param  sequence       Device-resident sequence pointer.
+ * @param  blockStartKmer Index of the first k-mer assigned to this block.
+ * @param  blockKmers     Number of k-mers handled by this block.
+ * @param  sequenceTile   Shared-memory output buffer (blockKmers + k - 1 bytes).
+ * @return @c true if no invalid bases are present in the tile.
+ */
 template <typename Config>
 __device__ __forceinline__ bool prepareSequenceHashTiles(
     const char* sequence,
@@ -702,6 +1026,18 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
     return __syncthreads_count(localInvalidBase) == 0;
 }
 
+/**
+ * @brief CUDA kernel: queries k-mers from a sequence against the filter.
+ *
+ * Each thread processes @c kStride consecutive k-mers to amortise packing and
+ * shard loads. Threads sharing the same shard collaborate via
+ * @c __match_any_sync to load the shard words once and broadcast them.
+ *
+ * @tparam Config  Filter configuration.
+ * @param  input   Sequence descriptor (device span + k-mer count).
+ * @param  shards  Device-resident shard array (read-only).
+ * @param  output  Per-k-mer result buffer (1 = present, 0 = absent).
+ */
 template <typename Config>
 __global__ void containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
@@ -740,7 +1076,7 @@ __global__ void containsSequenceKmersKernel(
     // Per-k-mer validity tracking when the tile contains invalid bases.
     bool kmerValid[kStride];
     _Pragma("unroll")
-    for (bool & s : kmerValid) {
+    for (bool& s : kmerValid) {
         s = true;
     }
 
@@ -827,6 +1163,17 @@ __global__ void containsSequenceKmersKernel(
     }
 }
 
+/**
+ * @brief CUDA kernel: inserts k-mers from a sequence into the filter.
+ *
+ * Each thread processes one k-mer. Threads sharing the same target shard
+ * cooperate via @c __match_any_sync and @c warpReduceOr to merge bitmasks
+ * before issuing a minimal number of @c atomicOr operations.
+ *
+ * @tparam Config  Filter configuration.
+ * @param  input   Sequence descriptor.
+ * @param  shards  Device-resident shard array (modified in place).
+ */
 template <typename Config>
 __global__ void insertSequenceKmersKernel(
     SequenceKmerInput<Config> input,

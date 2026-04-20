@@ -19,8 +19,8 @@ template <typename T>
 struct device_span : cuda::std::span<T> {
     using cuda::std::span<T>::span;
 
-    /// Implicit widening from device_span<U> where U* converts to T*
-    /// (e.g. device_span<int> -> device_span<const int>).
+    /// Implicit widening from `device_span<U>` where `U*` converts to `T*`
+    /// (e.g. `device_span<int>` to `device_span<const int>`).
     template <typename U>
         requires std::is_convertible_v<U (*)[], T (*)[]>
     constexpr explicit device_span(device_span<U> other) noexcept

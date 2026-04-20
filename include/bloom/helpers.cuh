@@ -54,7 +54,7 @@ constexpr auto divUp(Integer x, Integer y) {
  * For uint32_t: loads 8 values (v8.u32)
  *
  * @note Only available on sm_100+ architectures with PTX 8.8.
- *       Use __CUDA_ARCH__ >= 1000 guard at call sites.
+ *       Use `__CUDA_ARCH__` >= 1000 guard at call sites.
  *
  * @tparam T Element type (uint32_t or uint64_t)
  * @param ptr Source pointer (must be 32-byte aligned)
@@ -99,8 +99,7 @@ __device__ __forceinline__ void load256BitGlobalNC(
 /**
  * @brief Loads 128 bits from global memory using the non-coherent cache path.
  *
- * Uses two ld.global.nc.v2.u64 instructions for uint64_t, or one
- * ld.global.nc.v4.u32 for uint32_t.
+ * Uses the `ld.global.nc.v2.u64` instruction for uint64_t
  */
 __device__ __forceinline__ void
 load128BitGlobalNC(const uint64_t* ptr, uint64_t& out0, uint64_t& out1) {
