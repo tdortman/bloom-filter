@@ -67,8 +67,6 @@
               cudaPkgs.nsight_compute
 
               rust-analyzer
-              llvm.clang
-              mold-unwrapped
               ninja
             ]
             ++ [
