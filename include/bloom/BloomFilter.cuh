@@ -6,6 +6,8 @@
 #include <cuda/std/span>
 #include <cuda/stream_ref>
 
+#include <cub/warp/warp_reduce.cuh>
+
 #include <thrust/copy.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
@@ -117,6 +119,13 @@ template <typename Config>
 class Filter;
 
 namespace detail {
+
+template <typename T>
+struct BitwiseOr {
+    __host__ __device__ __forceinline__ T operator()(T lhs, T rhs) const {
+        return lhs | rhs;
+    }
+};
 
 template <typename Config>
 struct SequenceKmerInput;
@@ -1157,9 +1166,9 @@ __global__ void containsSequenceKmersKernel(
 /**
  * @brief CUDA kernel: inserts k-mers from a sequence into the filter.
  *
- * Each thread processes one k-mer. Threads sharing the same target shard
- * cooperate via @c __match_any_sync and @c warpReduceOr to merge bitmasks
- * before issuing a minimal number of @c atomicOr operations.
+ * Each thread processes one k-mer. Consecutive threads targeting the same
+ * shard use @c cub::WarpReduce::HeadSegmentedReduce to merge bitmasks before
+ * the run head issues a minimal number of @c atomicOr operations.
  *
  * @tparam Config  Filter configuration.
  * @param  input   Sequence descriptor.
@@ -1171,8 +1180,13 @@ __global__ void insertSequenceKmersKernel(
     device_span<typename Filter<Config>::Shard> shards
 ) {
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize + Config::k - 1;
+    constexpr uint32_t warpSize = 32;
+    constexpr uint32_t warpsPerBlock = Config::cudaBlockSize / warpSize;
+
+    using WarpReduceWord = cub::WarpReduce<typename Config::WordType>;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
+    __shared__ typename WarpReduceWord::TempStorage reduceStorage[warpsPerBlock][4];
 
     const uint64_t numKmers = input.kmerCount();
     const uint64_t blockStartKmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
@@ -1189,8 +1203,8 @@ __global__ void insertSequenceKmersKernel(
         input.sequence.data(), blockStartKmer, blockKmers, sequenceTile
     );
 
-    // Avoid early returns so all warp lanes can participate in
-    // __match_any_sync / __reduce_or_sync below.
+    // Avoid early returns so all warp lanes can participate in the segmented
+    // warp reductions below.
     bool active = inRange;
 
     if (active && !blockAllValid) {
@@ -1203,8 +1217,8 @@ __global__ void insertSequenceKmersKernel(
         }
     }
 
-    // Inactive threads keep zero masks and a per-lane sentinel shard index
-    // so they never match an active thread in __match_any_sync.
+    // Inactive threads keep zero masks and a per-lane sentinel shard index so
+    // contiguous run detection naturally splits around them.
     uint64_t minimizerHash = 0;
     typename Config::WordType wordMask0 = 0;
     typename Config::WordType wordMask1 = 0;
@@ -1228,20 +1242,27 @@ __global__ void insertSequenceKmersKernel(
         }
     }
 
-    // Warp-aggregated reductions: threads sharing the same shard merge their
-    // masks so only one representative issues the atomicOr
-    // Inactive threads use a per-lane sentinel that never matches peers.
+    // Warp-local segmented reductions: contiguous threads sharing the same
+    // shard merge their masks so only the run head issues the atomicOrs.
     const auto shardIdx =
         static_cast<uint32_t>(active ? (minimizerHash & (shards.size() - 1)) : ~threadIdx.x);
 
-    const unsigned peers = __match_any_sync(0xffffffff, shardIdx);
-    wordMask0 = warpReduceOr(peers, wordMask0);
-    wordMask1 = warpReduceOr(peers, wordMask1);
-    wordMask2 = warpReduceOr(peers, wordMask2);
-    wordMask3 = warpReduceOr(peers, wordMask3);
-    const bool isLeader = (threadIdx.x & 31) == static_cast<unsigned>(__ffs(peers) - 1);
+    const uint32_t lane = threadIdx.x & (warpSize - 1);
+    const uint32_t warpIdx = threadIdx.x / warpSize;
+    const uint32_t prevShardIdx = __shfl_up_sync(0xffffffff, shardIdx, 1);
+    const bool runHead = (lane == 0) || (shardIdx != prevShardIdx);
+    const BitwiseOr<typename Config::WordType> bitwiseOr{};
 
-    if (isLeader && active) {
+    wordMask0 = WarpReduceWord(reduceStorage[warpIdx][0])
+                    .HeadSegmentedReduce(wordMask0, runHead, bitwiseOr);
+    wordMask1 = WarpReduceWord(reduceStorage[warpIdx][1])
+                    .HeadSegmentedReduce(wordMask1, runHead, bitwiseOr);
+    wordMask2 = WarpReduceWord(reduceStorage[warpIdx][2])
+                    .HeadSegmentedReduce(wordMask2, runHead, bitwiseOr);
+    wordMask3 = WarpReduceWord(reduceStorage[warpIdx][3])
+                    .HeadSegmentedReduce(wordMask3, runHead, bitwiseOr);
+
+    if (runHead && active) {
         auto& shard = shards[shardIdx];
         if (wordMask0 != 0) {
             atomicOrWord(&shard.words[0], wordMask0);
