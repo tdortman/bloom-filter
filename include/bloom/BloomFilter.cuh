@@ -256,28 +256,16 @@ __host__ __device__ __forceinline__ void forEachHashIndex(Fn&& fn) {
 /**
  * @brief Encodes a nucleotide character to a 2-bit value.
  *
- * Maps A/a→0, C/c→1, G/g→2, T/t→3. Any other character returns 0xFF.
+ * Maps A/a→0, C/c→1, T/t→2, G/g→3. Any other character returns 0xFF.
  *
  * @param base  ASCII nucleotide character.
  * @return 2-bit encoding, or 0xFF for invalid input.
  */
 constexpr __host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
-    switch (base) {
-        case 'A':
-        case 'a':
-            return 0;
-        case 'C':
-        case 'c':
-            return 1;
-        case 'G':
-        case 'g':
-            return 2;
-        case 'T':
-        case 't':
-            return 3;
-        default:
-            return 0xFF;
-    }
+    const uint8_t upper = base & 0xDFu;   // force upper for validation only
+    const uint8_t x = (base >> 1u) & 3u;  // A=0, C=1, T=2, G=3
+    const int valid = (upper == 'A') | (upper == 'C') | (upper == 'G') | (upper == 'T');
+    return valid ? x : 0xFF;
 }
 
 /**
@@ -412,6 +400,10 @@ class Filter {
         static constexpr uint64_t wordCount = Config::blockWordCount;
         static constexpr uint64_t wordBits = Config::wordBits;
         static constexpr int wordBitsLog2 = cuda::std::bit_width(wordBits) - 1;
+        static constexpr uint64_t wordMask = (1ULL << wordBitsLog2) - 1;
+        static constexpr int hashShift = 64 - wordBitsLog2;
+        static constexpr uint64_t sliceWidth = 64 / Config::hashCount;
+        static constexpr bool useBitSlicing = sliceWidth >= wordBitsLog2;
 
         WordType words[wordCount];
 
@@ -433,12 +425,11 @@ class Filter {
             // When there are enough bits in a 64-bit hash to give each hash
             // index its own slice, avoid the extra multiply and use
             // bit-slicing instead.
-            if constexpr (64 / Config::hashCount >= wordBitsLog2) {
-                constexpr uint64_t sliceWidth = 64 / Config::hashCount;
-                return (baseHash >> (sliceWidth * HashIndex)) & ((1ULL << wordBitsLog2) - 1);
+            if constexpr (useBitSlicing) {
+                return (baseHash >> (sliceWidth * HashIndex)) & wordMask;
             } else {
                 const uint64_t mixed = baseHash * detail::multiplicativeSaltLiteral<HashIndex>();
-                return static_cast<uint64_t>(mixed >> (64 - wordBitsLog2));
+                return static_cast<uint64_t>(mixed >> hashShift);
             }
         }
 

@@ -238,7 +238,7 @@ constexpr uint64_t rolnValue(uint64_t x) {
 /**
  * @brief Four-element seed lookup table for ntHash rolling hash.
  *
- * Entries are indexed by the 2-bit base encoding (A=0, C=1, G=2, T=3).
+ * Entries are indexed by the 2-bit base encoding (A=0, C=1, T=2, G=3).
  */
 struct SeedTable {
     uint64_t v[4];
@@ -252,16 +252,16 @@ initSeedTables(SeedTable& seeds, SeedTable& rolledM, SeedTable& rolledS) {
     if (threadIdx.x == 0) {
         seeds.v[0] = SEED_A;
         seeds.v[1] = SEED_C;
-        seeds.v[2] = SEED_G;
-        seeds.v[3] = SEED_T;
+        seeds.v[2] = SEED_T;
+        seeds.v[3] = SEED_G;
         rolledM.v[0] = rolnValue<W_m>(SEED_A);
         rolledM.v[1] = rolnValue<W_m>(SEED_C);
-        rolledM.v[2] = rolnValue<W_m>(SEED_G);
-        rolledM.v[3] = rolnValue<W_m>(SEED_T);
+        rolledM.v[2] = rolnValue<W_m>(SEED_T);
+        rolledM.v[3] = rolnValue<W_m>(SEED_G);
         rolledS.v[0] = rolnValue<W_s>(SEED_A);
         rolledS.v[1] = rolnValue<W_s>(SEED_C);
-        rolledS.v[2] = rolnValue<W_s>(SEED_G);
-        rolledS.v[3] = rolnValue<W_s>(SEED_T);
+        rolledS.v[2] = rolnValue<W_s>(SEED_T);
+        rolledS.v[3] = rolnValue<W_s>(SEED_G);
     }
 }
 
