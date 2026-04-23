@@ -274,7 +274,10 @@ constexpr __host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
     const uint8_t upper = base & 0xDFu;   // force upper for validation only
     const uint8_t x = (base >> 1u) & 3u;  // A=0, C=1, T=2, G=3
     const int valid = (upper == 'A') | (upper == 'C') | (upper == 'G') | (upper == 'T');
-    return valid ? x : 0xFF;
+
+    // Turn valid (0 or 1) into mask (0x00 or 0xFF)
+    const uint8_t mask = -valid;
+    return (x & mask) | (0xFFu & ~mask);
 }
 
 /**
