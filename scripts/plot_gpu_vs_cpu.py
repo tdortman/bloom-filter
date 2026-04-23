@@ -95,7 +95,7 @@ def generate_plot(
                 fontweight="bold",
             )
 
-        ax.set_yscale("log")
+        # ax.set_yscale("log")
         ax.set_ylabel(
             f"{label} [{unit}]", fontsize=AXIS_LABEL_FONT_SIZE, fontweight="bold"
         )
