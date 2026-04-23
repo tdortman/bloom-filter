@@ -16,6 +16,7 @@ import pandas as pd
 import plot_utils as pu
 import typer
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MultipleLocator
 
 app = typer.Typer(help="Compare filters for throughput and memory usage")
 
@@ -175,6 +176,7 @@ def main(
         pu.THROUGHPUT_LABEL, fontsize=pu.AXIS_LABEL_FONT_SIZE, fontweight="bold"
     )
     ax_throughput.set_xscale("log", base=2)
+    ax_throughput.yaxis.set_major_locator(MultipleLocator(10))
     # ax_throughput.set_yscale("log")
     ax_throughput.grid(True, which="major", ls="--", alpha=pu.GRID_ALPHA)
     # Keep both y-axis spines visible and distinct.
