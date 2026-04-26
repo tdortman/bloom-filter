@@ -124,7 +124,7 @@ def extract_filter_series(name: str, row: pd.Series) -> Optional[tuple[str, str,
     )
 
 
-def get_plot_style(filter_type: str, base_filter: str) -> dict[str, object]:
+def get_plot_style(filter_type: str, base_filter: str) -> dict[str, str]:
     """Get style for a filter series, including SuperBloom variant styling."""
     style = dict(
         pu.FILTER_STYLES.get(

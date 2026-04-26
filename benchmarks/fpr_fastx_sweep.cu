@@ -78,7 +78,7 @@ static void prepareFastxData() {
     }
 
     g_fastxData->d_insertSequence.resize(hostInsert.size());
-    CUDA_CALL(cudaMemcpy(
+    BLOOM_CUDA_CALL(cudaMemcpy(
         thrust::raw_pointer_cast(g_fastxData->d_insertSequence.data()),
         hostInsert.data(),
         hostInsert.size(),
@@ -105,7 +105,7 @@ static void prepareFastxData() {
         thrust::raw_pointer_cast(g_fastxData->d_queryPackedKmers.data())
     );
 
-    CUDA_CALL(cudaDeviceSynchronize());
+    BLOOM_CUDA_CALL(cudaDeviceSynchronize());
 }
 
 static void setFprFastxCounters(
@@ -221,7 +221,7 @@ void runSuperBloomFprFastxBenchmark(Fixture& fixture, bm::State& state) {
             g_fastxData->d_insertSequence.size()
         }
     ));
-    CUDA_CALL(cudaDeviceSynchronize());
+    BLOOM_CUDA_CALL(cudaDeviceSynchronize());
 
     for (auto _ : state) {
         fixture.timer.start();
@@ -258,7 +258,7 @@ void runCucoFprFastxBenchmark(CucoBloomFprFastxFixture& fixture, bm::State& stat
     fixture.filter->add(
         g_fastxData->d_insertPackedKmers.begin(), g_fastxData->d_insertPackedKmers.end()
     );
-    CUDA_CALL(cudaDeviceSynchronize());
+    BLOOM_CUDA_CALL(cudaDeviceSynchronize());
 
     for (auto _ : state) {
         fixture.timer.start();

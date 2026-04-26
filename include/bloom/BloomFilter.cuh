@@ -541,7 +541,7 @@ class Filter {
             device_span<const char>{thrust::raw_pointer_cast(d_sequence_.data()), sequence.size()},
             stream
         );
-        CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        BLOOM_CUDA_CALL(cudaStreamSynchronize(stream.get()));
         return totalKmers;
     }
 
@@ -641,7 +641,7 @@ class Filter {
             device_span<uint8_t>{thrust::raw_pointer_cast(d_resultBuffer_.data()), output.size()},
             stream
         );
-        CUDA_CALL(cudaMemcpyAsync(
+        BLOOM_CUDA_CALL(cudaMemcpyAsync(
             output.data(),
             thrust::raw_pointer_cast(d_resultBuffer_.data()),
             output.size() * sizeof(uint8_t),
@@ -649,7 +649,7 @@ class Filter {
             stream.get()
         ));
 
-        CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        BLOOM_CUDA_CALL(cudaStreamSynchronize(stream.get()));
         return output;
     }
 
@@ -684,10 +684,10 @@ class Filter {
      * @param stream CUDA stream to use.
      */
     void clear(cuda::stream_ref stream = cudaStream_t{}) {
-        CUDA_CALL(cudaMemsetAsync(
+        BLOOM_CUDA_CALL(cudaMemsetAsync(
             thrust::raw_pointer_cast(d_shards_.data()), 0, sizeBytes(), stream.get()
         ));
-        CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        BLOOM_CUDA_CALL(cudaStreamSynchronize(stream.get()));
     }
 
     /**
@@ -796,7 +796,7 @@ class Filter {
      */
     void stageSequence(cuda::std::span<const char> sequence, cuda::stream_ref stream) const {
         ensureSequenceCapacity(sequence.size());
-        CUDA_CALL(cudaMemcpyAsync(
+        BLOOM_CUDA_CALL(cudaMemcpyAsync(
             thrust::raw_pointer_cast(d_sequence_.data()),
             sequence.data(),
             sequence.size_bytes(),
@@ -822,7 +822,7 @@ class Filter {
                 detail::SequenceKmerInput<Config>{d_sequence},
                 device_span<Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_}
             );
-        CUDA_CALL(cudaGetLastError());
+        BLOOM_CUDA_CALL(cudaGetLastError());
     }
 
     /**
@@ -837,7 +837,7 @@ class Filter {
         cuda::stream_ref stream
     ) const {
         const uint64_t numKmers = d_sequence.size() - Config::k + 1;
-        CUDA_CALL(cudaMemsetAsync(d_output.data(), 0, d_output.size_bytes(), stream.get()));
+        BLOOM_CUDA_CALL(cudaMemsetAsync(d_output.data(), 0, d_output.size_bytes(), stream.get()));
         const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize);
 
         detail::containsSequenceKmersKernel<Config>
@@ -846,7 +846,7 @@ class Filter {
                 device_span<const Shard>{thrust::raw_pointer_cast(d_shards_.data()), numShards_},
                 d_output
             );
-        CUDA_CALL(cudaGetLastError());
+        BLOOM_CUDA_CALL(cudaGetLastError());
     }
 };
 

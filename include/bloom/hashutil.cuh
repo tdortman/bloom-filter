@@ -43,7 +43,8 @@
  *   - xxHash homepage: https://www.xxhash.com
  *   - xxHash source repository: https://github.com/Cyan4973/xxHash
  */
-namespace xxhash {
+
+namespace bloom::detail::xxhash {
 
 constexpr uint64_t PRIME64_1 = 11400714785074694791ULL;
 constexpr uint64_t PRIME64_2 = 14029467366897019727ULL;
@@ -175,7 +176,7 @@ __host__ __device__ inline uint64_t xxhash64(const T& key, uint64_t seed = 0) {
     return finalize(h64);
 }
 
-}  // namespace xxhash
+}  // namespace bloom::detail::xxhash
 
 namespace bloom::detail {
 

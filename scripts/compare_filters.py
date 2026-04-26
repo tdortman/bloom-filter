@@ -113,8 +113,9 @@ def main(
 
     output_dir = pu.resolve_output_dir(output_dir, Path(__file__))
 
-    fig, ax_throughput = plt.subplots(figsize=(12, 7))
+    fig, ax_throughput = plt.subplots(figsize=(12, 8.5))
     ax_throughput.set_facecolor("white")
+    fig.subplots_adjust(top=0.78)
 
     def get_last_throughput(bench_key):
         sizes = sorted(throughput_data[bench_key].keys())
@@ -170,7 +171,7 @@ def main(
 
 
     ax_throughput.set_xlabel(
-        "Input Size", fontsize=pu.AXIS_LABEL_FONT_SIZE, fontweight="bold"
+        "Input Size [bases]", fontsize=pu.AXIS_LABEL_FONT_SIZE, fontweight="bold"
     )
     ax_throughput.set_ylabel(
         pu.THROUGHPUT_LABEL, fontsize=pu.AXIS_LABEL_FONT_SIZE, fontweight="bold"
@@ -194,6 +195,7 @@ def main(
         ncol=max(1, min(2, len(filter_handles))),
         framealpha=pu.LEGEND_FRAME_ALPHA,
     )
+    filter_legend.set_clip_on(False)
     ax_throughput.add_artist(filter_legend)
 
     operation_handles = [
@@ -209,8 +211,9 @@ def main(
         for op in ("Insert", "Query", "Delete")
         if op in seen_operations
     ]
+    op_legend = None
     if operation_handles:
-        ax_throughput.legend(
+        op_legend = ax_throughput.legend(
             handles=operation_handles,
             fontsize=pu.LEGEND_FONT_SIZE,
             loc="lower right",
@@ -218,14 +221,22 @@ def main(
             ncol=max(1, len(operation_handles)),
             framealpha=pu.LEGEND_FRAME_ALPHA,
         )
-
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
+        op_legend.set_clip_on(False)
 
     output_file = output_dir / "benchmark_throughput_memory.pdf"
-    pu.save_figure(
-        None,
+    extra_artists = [filter_legend]
+    if op_legend is not None:
+        extra_artists.append(op_legend)
+    plt.savefig(
         output_file,
-        f"Throughput+memory plot saved to {output_file}",
+        bbox_extra_artists=extra_artists,
+        bbox_inches="tight",
+        transparent=True,
+        format="pdf",
+        dpi=600,
+    )
+    typer.secho(
+        f"Throughput+memory plot saved to {output_file}", fg=typer.colors.GREEN
     )
 
 

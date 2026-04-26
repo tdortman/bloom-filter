@@ -137,7 +137,7 @@ __device__ __forceinline__ uint64_t warpReduceOr(uint32_t peers, uint64_t value)
  * @brief Macro for checking CUDA errors.
  * Throws bloom::CudaError on failure.
  */
-#define CUDA_CALL(err)                                    \
+#define BLOOM_CUDA_CALL(err)                              \
     do {                                                  \
         cudaError_t err_ = (err);                         \
         if (err_ == cudaSuccess) [[likely]] {             \

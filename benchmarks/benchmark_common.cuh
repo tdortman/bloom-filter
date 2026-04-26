@@ -12,8 +12,11 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <unordered_map>
 
 #include <bloom/BloomFilter.cuh>
+#include <bloom/device_span.cuh>
 #include <bloom/helpers.cuh>
 
 namespace benchmark_common {
@@ -21,8 +24,8 @@ namespace benchmark_common {
 class GPUTimer {
    public:
     GPUTimer() {
-        CUDA_CALL(cudaEventCreate(&start_));
-        CUDA_CALL(cudaEventCreate(&stop_));
+        BLOOM_CUDA_CALL(cudaEventCreate(&start_));
+        BLOOM_CUDA_CALL(cudaEventCreate(&stop_));
     }
 
     ~GPUTimer() {
@@ -34,15 +37,15 @@ class GPUTimer {
     GPUTimer& operator=(const GPUTimer&) = delete;
 
     void start(cudaStream_t stream = {}) {
-        CUDA_CALL(cudaEventRecord(start_, stream));
+        BLOOM_CUDA_CALL(cudaEventRecord(start_, stream));
     }
 
     [[nodiscard]] double elapsed(cudaStream_t stream = {}) {
-        CUDA_CALL(cudaEventRecord(stop_, stream));
-        CUDA_CALL(cudaEventSynchronize(stop_));
+        BLOOM_CUDA_CALL(cudaEventRecord(stop_, stream));
+        BLOOM_CUDA_CALL(cudaEventSynchronize(stop_));
 
         float milliseconds = 0.0f;
-        CUDA_CALL(cudaEventElapsedTime(&milliseconds, start_, stop_));
+        BLOOM_CUDA_CALL(cudaEventElapsedTime(&milliseconds, start_, stop_));
         return static_cast<double>(milliseconds) / 1000.0;
     }
 
@@ -76,6 +79,16 @@ inline void setFprCounters(benchmark::State& state, uint64_t falsePositives, uin
     state.counters["fpr_percentage"] = benchmark::Counter(
         100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers)
     );
+}
+
+inline void setBenchmarkCounters(
+    benchmark::State& state,
+    uint64_t memoryBytes,
+    uint64_t sequenceLength,
+    uint64_t numKmers
+) {
+    setCommonCounters(state, memoryBytes, numKmers, sequenceLength);
+    state.counters["num_kmers"] = benchmark::Counter(static_cast<double>(numKmers));
 }
 
 inline void
@@ -145,7 +158,251 @@ inline void gpuEncodePackedKmers(
     encodePackedKmersKernel<K><<<gridSize, blockSize, 0, stream>>>(d_sequence, numKmers, d_output);
 }
 
+template <uint64_t K>
+struct BenchmarkData {
+    uint64_t sequenceLength{};
+    uint64_t numKmers{};
+
+    thrust::device_vector<char> d_throughputSequence;
+    thrust::device_vector<uint64_t> d_throughputPackedKmers;
+
+    thrust::device_vector<char> d_fprInsertSequence;
+    thrust::device_vector<uint64_t> d_fprInsertPackedKmers;
+    thrust::device_vector<char> d_zeroOverlapSequence;
+    thrust::device_vector<uint64_t> d_zeroOverlapPackedKmers;
+    bool fprDataReady = false;
+
+    void generateThroughputData() {
+        gpuGenerateDna(d_throughputSequence, sequenceLength, 42);
+        numKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
+        d_throughputPackedKmers.resize(numKmers);
+    }
+
+    void ensureFprData() const {
+        if (fprDataReady) {
+            return;
+        }
+        const_cast<BenchmarkData*>(this)->generateFprData();
+    }
+
+   private:
+    void generateFprData() {
+        gpuGenerateDna(d_fprInsertSequence, sequenceLength, 7);
+        const uint64_t fprNumKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
+        d_fprInsertPackedKmers.resize(fprNumKmers);
+        gpuEncodePackedKmers<K>(
+            thrust::raw_pointer_cast(d_fprInsertSequence.data()),
+            sequenceLength,
+            thrust::raw_pointer_cast(d_fprInsertPackedKmers.data())
+        );
+
+        gpuGenerateDna(d_zeroOverlapSequence, sequenceLength, 1337);
+        d_zeroOverlapPackedKmers.resize(fprNumKmers);
+        gpuEncodePackedKmers<K>(
+            thrust::raw_pointer_cast(d_zeroOverlapSequence.data()),
+            sequenceLength,
+            thrust::raw_pointer_cast(d_zeroOverlapPackedKmers.data())
+        );
+
+        BLOOM_CUDA_CALL(cudaDeviceSynchronize());
+
+        fprDataReady = true;
+    }
+};
+
+template <uint64_t K>
+BenchmarkData<K>& getBenchmarkData(uint64_t length) {
+    static std::unordered_map<uint64_t, BenchmarkData<K>> cache;
+
+    auto it = cache.find(length);
+    if (it != cache.end()) {
+        return it->second;
+    }
+
+    cache.clear();
+
+    BenchmarkData<K> data;
+    data.sequenceLength = length;
+    data.generateThroughputData();
+    BLOOM_CUDA_CALL(cudaDeviceSynchronize());
+
+    return cache.emplace(length, std::move(data)).first->second;
+}
+
+template <typename Config>
+class SuperBloomFixtureBase : public benchmark::Fixture {
+   public:
+    static constexpr uint64_t k = Config::k;
+
+    void setupCommon(const benchmark::State& state) {
+        sequenceLength = static_cast<uint64_t>(state.range(0));
+        benchData = &getBenchmarkData<Config::k>(sequenceLength);
+
+        numKmers = benchData->numKmers;
+        numSmers = sequenceLength - Config::s + 1;
+
+        const uint64_t requestedFilterBits = cuda::std::bit_ceil(numKmers * 16);
+        filter = std::make_unique<bloom::Filter<Config>>(requestedFilterBits);
+        filterMemory = filter->filterBits() / 8;
+        d_output.resize(numKmers);
+    }
+
+    void tearDownCommon() {
+        filter.reset();
+        benchData = nullptr;
+        d_output.clear();
+        d_output.shrink_to_fit();
+    }
+
+    void setCounters(benchmark::State& state) const {
+        setBenchmarkCounters(state, filterMemory, sequenceLength, numKmers);
+        state.counters["s"] = benchmark::Counter(static_cast<double>(Config::s));
+        state.counters["hashes"] = benchmark::Counter(static_cast<double>(Config::hashCount));
+    }
+
+    uint64_t sequenceLength{};
+    uint64_t numKmers{};
+    uint64_t numSmers{};
+    uint64_t filterMemory{};
+    BenchmarkData<Config::k>* benchData{};
+    thrust::device_vector<uint8_t> d_output;
+    std::unique_ptr<bloom::Filter<Config>> filter;
+    GPUTimer timer;
+};
+
+template <typename Config>
+class SuperBloomConfigFixture : public SuperBloomFixtureBase<Config> {
+    using benchmark::Fixture::SetUp;
+    using benchmark::Fixture::TearDown;
+
+   public:
+    void SetUp(const benchmark::State& state) override {
+        this->setupCommon(state);
+    }
+
+    void TearDown(const benchmark::State&) override {
+        this->tearDownCommon();
+    }
+};
+
+template <typename Fixture>
+void runSuperBloomInsert(Fixture& fixture, benchmark::State& state) {
+    for (auto _ : state) {
+        fixture.filter->clear();
+        BLOOM_CUDA_CALL(cudaDeviceSynchronize());
+
+        fixture.timer.start();
+        benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                fixture.sequenceLength
+            }
+        ));
+        const double elapsed = fixture.timer.elapsed();
+        state.SetIterationTime(elapsed);
+    }
+    fixture.setCounters(state);
+}
+
+template <typename Fixture>
+void runSuperBloomQuery(Fixture& fixture, benchmark::State& state) {
+    fixture.filter->clear();
+    benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
+        bloom::device_span<const char>{
+            thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+            fixture.sequenceLength
+        }
+    ));
+    BLOOM_CUDA_CALL(cudaDeviceSynchronize());
+
+    for (auto _ : state) {
+        fixture.timer.start();
+        fixture.filter->containsSequenceDevice(
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
+                fixture.sequenceLength
+            },
+            bloom::device_span<uint8_t>{
+                thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+            }
+        );
+        const double elapsed = fixture.timer.elapsed();
+        state.SetIterationTime(elapsed);
+        benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
+    }
+    fixture.setCounters(state);
+}
+
+template <typename Fixture>
+void runSuperBloomFpr(Fixture& fixture, benchmark::State& state) {
+    fixture.benchData->ensureFprData();
+
+    fixture.filter->clear();
+    benchmark::DoNotOptimize(fixture.filter->insertSequenceDevice(
+        bloom::device_span<const char>{
+            thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
+            fixture.sequenceLength
+        }
+    ));
+    BLOOM_CUDA_CALL(cudaDeviceSynchronize());
+
+    uint64_t falsePositives = 0;
+    for (auto _ : state) {
+        fixture.timer.start();
+        fixture.filter->containsSequenceDevice(
+            bloom::device_span<const char>{
+                thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
+                fixture.sequenceLength
+            },
+            bloom::device_span<uint8_t>{
+                thrust::raw_pointer_cast(fixture.d_output.data()), fixture.d_output.size()
+            }
+        );
+        const double elapsed = fixture.timer.elapsed();
+        state.SetIterationTime(elapsed);
+        benchmark::DoNotOptimize(thrust::raw_pointer_cast(fixture.d_output.data()));
+    }
+
+    falsePositives = static_cast<uint64_t>(
+        thrust::count(fixture.d_output.begin(), fixture.d_output.end(), uint8_t{1})
+    );
+    fixture.setCounters(state);
+    setFprCounters(state, falsePositives, fixture.numKmers);
+}
+
 }  // namespace benchmark_common
+
+#define BENCHMARK_SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Config
+#define BENCHMARK_SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) \
+    SuperBloom_K##K##_S##S##_M##M##_H##H##_Fixture
+
+#define BENCHMARK_DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE(K, S, M, H)                         \
+    using BENCHMARK_SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) = bloom::Config<K, S, M, H, 256>; \
+    using BENCHMARK_SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) =                                \
+        benchmark_common::SuperBloomConfigFixture<BENCHMARK_SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H)>;
+
+#define BENCHMARK_DEFINE_SUPERBLOOM_ALL(FixtureName)                    \
+    BENCHMARK_DEFINE_F(FixtureName, Insert)(benchmark::State & state) { \
+        benchmark_common::runSuperBloomInsert(*this, state);            \
+    }                                                                   \
+    BENCHMARK_DEFINE_F(FixtureName, Query)(benchmark::State & state) {  \
+        benchmark_common::runSuperBloomQuery(*this, state);             \
+    }                                                                   \
+    BENCHMARK_DEFINE_F(FixtureName, FPR)(benchmark::State & state) {    \
+        benchmark_common::runSuperBloomFpr(*this, state);               \
+    }
+
+#define BENCHMARK_DEFINE_SUPERBLOOM_FPR_ONLY(FixtureName)            \
+    BENCHMARK_DEFINE_F(FixtureName, FPR)(benchmark::State & state) { \
+        benchmark_common::runSuperBloomFpr(*this, state);            \
+    }
+
+#define BENCHMARK_REGISTER_SUPERBLOOM_ALL(FixtureName) \
+    REGISTER_BENCHMARK(FixtureName, Insert);           \
+    REGISTER_BENCHMARK(FixtureName, Query);            \
+    REGISTER_BENCHMARK(FixtureName, FPR);
+
+#define BENCHMARK_REGISTER_SUPERBLOOM_FPR_ONLY(FixtureName) REGISTER_BENCHMARK(FixtureName, FPR);
 
 #define BENCHMARK_CONFIG                \
     ->RangeMultiplier(2)                \

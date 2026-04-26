@@ -10,6 +10,7 @@ build
 /subprojects/moderngpu.wrap
 /subprojects/openssl.wrap
 /subprojects/zlib.wrap
+/subprojects/gossip.wrap
 
 *.*-rep
 *.sqlite

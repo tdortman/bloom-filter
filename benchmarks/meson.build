@@ -17,14 +17,16 @@ cuco_opts.add_cmake_defines(
 )
 cuco_dep = cmake.subproject('cuco', options: cuco_opts).dependency('cuco')
 
+cuckoogpu_dep = subproject('cuckoogpu').get_variable('cuckoogpu_dep')
+
 bench_deps = [benchmark_dep, bloom_dep]
 
 benchmarks = {}
 
 benchmarks += {
-    'superbloom-vs-cuco-bloom': {
-        'src': 'superbloom_vs_cuco_bloom.cu',
-        'deps': [cuco_dep],
+    'gpu-filter-comparison': {
+        'src': 'gpu_filter_comparison.cu',
+        'deps': [cuco_dep, cuckoogpu_dep],
     },
     'fpr-fastx-sweep': {
         'src': 'fpr_fastx_sweep.cu',

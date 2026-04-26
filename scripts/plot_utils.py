@@ -18,16 +18,19 @@ import typer
 FILTER_STYLES = {
     "superbloom": {"color": "#2E86AB", "marker": "o"},
     "cucobloom": {"color": "#A23B72", "marker": "s"},
+    "cuckoogpu": {"color": "#F18F01", "marker": "^"},
 }
 
 FILTER_COLORS = {
     "superbloom": FILTER_STYLES["superbloom"]["color"],
     "cucobloom": FILTER_STYLES["cucobloom"]["color"],
+    "cuckoogpu": FILTER_STYLES["cuckoogpu"]["color"],
 }
 
 FILTER_DISPLAY_NAMES = {
     "superbloom": "GPU SuperBloom",
     "cucobloom": "GPU Blocked Bloom",
+    "cuckoogpu": "Cuckoo-GPU",
 }
 
 OPERATION_COLORS = {
