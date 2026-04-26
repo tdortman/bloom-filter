@@ -168,7 +168,7 @@ def sort_filters_by_descending_fpr(
 @app.command()
 def main(
     csv_file: Path = typer.Argument(
-        Path("./benchmark_results/fpr_results.csv"),
+        ...,
         help="Path to the CSV file containing benchmark results",
     ),
     output_dir: Path = typer.Option(

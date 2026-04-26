@@ -1,11 +1,6 @@
 #include <benchmark/benchmark.h>
 #include <cuda_runtime.h>
-#include <thrust/count.h>
-#include <thrust/device_ptr.h>
 #include <thrust/device_vector.h>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/random.h>
-#include <thrust/transform.h>
 #include <cuda/std/bit>
 #include <cuda/std/span>
 
@@ -56,72 +51,6 @@ using CucoBloom = cuco::bloom_filter<uint64_t>;
 constexpr uint64_t kBitsPerItem = 16;
 
 template <uint64_t K>
-__global__ void encodePackedKmersKernel(const char* sequence, uint64_t numKmers, uint64_t* output) {
-    const uint64_t idx = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx >= numKmers) {
-        return;
-    }
-
-    uint64_t packed = 0;
-    for (uint64_t i = 0; i < K; ++i) {
-        const uint8_t encoded = bloom::detail::encodeBase(static_cast<uint8_t>(sequence[idx + i]));
-        packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3);
-    }
-    output[idx] = packed;
-}
-
-template <uint64_t K>
-void gpuEncodePackedKmers(
-    const char* d_sequence,
-    uint64_t sequenceLength,
-    uint64_t* d_output,
-    cudaStream_t stream = {}
-) {
-    const uint64_t numKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
-    if (numKmers == 0) {
-        return;
-    }
-    constexpr uint64_t blockSize = 256;
-    const uint64_t gridSize = bloom::detail::divUp(numKmers, blockSize);
-    encodePackedKmersKernel<K><<<gridSize, blockSize, 0, stream>>>(d_sequence, numKmers, d_output);
-}
-
-void gpuGenerateDna(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t seed = 42) {
-    d_seq.resize(length);
-    thrust::transform(
-        thrust::counting_iterator<uint64_t>(0),
-        thrust::counting_iterator<uint64_t>(length),
-        d_seq.begin(),
-        [seed] __device__(uint64_t idx) {
-            thrust::default_random_engine rng(seed);
-            thrust::uniform_int_distribution<uint32_t> dist(0, 3);
-            rng.discard(idx);
-            static constexpr char bases[] = {'A', 'C', 'G', 'T'};
-            return bases[dist(rng)];
-        }
-    );
-}
-
-void gpuGeneratePackedKmers(
-    thrust::device_vector<uint64_t>& d_kmers,
-    uint64_t count,
-    uint32_t seed = 42
-) {
-    d_kmers.resize(count);
-    thrust::transform(
-        thrust::counting_iterator<uint64_t>(0),
-        thrust::counting_iterator<uint64_t>(count),
-        d_kmers.begin(),
-        [seed] __device__(uint64_t idx) {
-            thrust::default_random_engine rng(seed);
-            thrust::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX);
-            rng.discard(idx);
-            return dist(rng);
-        }
-    );
-}
-
-template <uint64_t K>
 struct BenchmarkData {
     uint64_t sequenceLength{};
     uint64_t numKmers{};
@@ -136,9 +65,9 @@ struct BenchmarkData {
     bool fprDataReady = false;
 
     void generateThroughputData() {
-        gpuGenerateDna(d_throughputSequence, sequenceLength, 42);
+        benchmark_common::gpuGenerateDna(d_throughputSequence, sequenceLength, 42);
         numKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
-        gpuGeneratePackedKmers(d_throughputPackedKmers, numKmers, 42);
+        benchmark_common::gpuGeneratePackedKmers(d_throughputPackedKmers, numKmers, 42);
     }
 
     void ensureFprData() const {
@@ -150,18 +79,18 @@ struct BenchmarkData {
 
    private:
     void generateFprData() {
-        gpuGenerateDna(d_fprInsertSequence, sequenceLength, 7);
+        benchmark_common::gpuGenerateDna(d_fprInsertSequence, sequenceLength, 7);
         const uint64_t fprNumKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
         d_fprInsertPackedKmers.resize(fprNumKmers);
-        gpuEncodePackedKmers<K>(
+        benchmark_common::gpuEncodePackedKmers<K>(
             thrust::raw_pointer_cast(d_fprInsertSequence.data()),
             sequenceLength,
             thrust::raw_pointer_cast(d_fprInsertPackedKmers.data())
         );
 
-        gpuGenerateDna(d_zeroOverlapSequence, sequenceLength, 1337);
+        benchmark_common::gpuGenerateDna(d_zeroOverlapSequence, sequenceLength, 1337);
         d_zeroOverlapPackedKmers.resize(fprNumKmers);
-        gpuEncodePackedKmers<K>(
+        benchmark_common::gpuEncodePackedKmers<K>(
             thrust::raw_pointer_cast(d_zeroOverlapSequence.data()),
             sequenceLength,
             thrust::raw_pointer_cast(d_zeroOverlapPackedKmers.data())
@@ -323,11 +252,7 @@ class CucoBloomFixture : public bm::Fixture {
     benchmark_common::GPUTimer timer;
 };
 
-void setFprCounters(bm::State& state, uint64_t falsePositives, uint64_t numKmers) {
-    state.counters["false_positives"] = bm::Counter(static_cast<double>(falsePositives));
-    state.counters["fpr_percentage"] =
-        bm::Counter(100.0 * static_cast<double>(falsePositives) / static_cast<double>(numKmers));
-}
+
 
 template <typename Fixture>
 void runSuperBloomInsertBenchmark(Fixture& fixture, bm::State& state) {
@@ -411,7 +336,7 @@ void runSuperBloomFprBenchmark(Fixture& fixture, bm::State& state) {
         thrust::count(fixture.d_output.begin(), fixture.d_output.end(), uint8_t{1})
     );
     fixture.setCounters(state);
-    setFprCounters(state, falsePositives, fixture.numKmers);
+    benchmark_common::setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
 void runCucoInsertBenchmark(CucoBloomFixture& fixture, bm::State& state) {
@@ -426,7 +351,7 @@ void runCucoInsertBenchmark(CucoBloomFixture& fixture, bm::State& state) {
                 fixture.benchData->d_throughputPackedKmers.end()
             );
         } else {
-            gpuEncodePackedKmers<CucoBloomFixture::k>(
+            benchmark_common::gpuEncodePackedKmers<CucoBloomFixture::k>(
                 thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
                 fixture.sequenceLength,
                 thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data())
@@ -450,7 +375,7 @@ void runCucoQueryBenchmark(CucoBloomFixture& fixture, bm::State& state) {
             fixture.benchData->d_throughputPackedKmers.end()
         );
     } else {
-        gpuEncodePackedKmers<CucoBloomFixture::k>(
+        benchmark_common::gpuEncodePackedKmers<CucoBloomFixture::k>(
             thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
             fixture.sequenceLength,
             thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data())
@@ -465,7 +390,7 @@ void runCucoQueryBenchmark(CucoBloomFixture& fixture, bm::State& state) {
     for (auto _ : state) {
         fixture.timer.start();
         if (g_inputMode == InputMode::Sequence) {
-            gpuEncodePackedKmers<CucoBloomFixture::k>(
+            benchmark_common::gpuEncodePackedKmers<CucoBloomFixture::k>(
                 thrust::raw_pointer_cast(fixture.benchData->d_throughputSequence.data()),
                 fixture.sequenceLength,
                 thrust::raw_pointer_cast(fixture.benchData->d_throughputPackedKmers.data())
@@ -497,7 +422,7 @@ void runCucoFprBenchmark(CucoBloomFixture& fixture, bm::State& state) {
     for (auto _ : state) {
         fixture.timer.start();
         if (g_inputMode == InputMode::Sequence) {
-            gpuEncodePackedKmers<CucoBloomFixture::k>(
+            benchmark_common::gpuEncodePackedKmers<CucoBloomFixture::k>(
                 thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
                 fixture.sequenceLength,
                 thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapPackedKmers.data())
@@ -517,7 +442,7 @@ void runCucoFprBenchmark(CucoBloomFixture& fixture, bm::State& state) {
         thrust::count(fixture.d_output.begin(), fixture.d_output.end(), uint8_t{1})
     );
     fixture.setCounters(state);
-    setFprCounters(state, falsePositives, fixture.numKmers);
+    benchmark_common::setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
 BENCHMARK_DEFINE_F(CucoBloomFixture, Insert)(bm::State& state) {

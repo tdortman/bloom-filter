@@ -26,6 +26,10 @@ benchmarks += {
         'src': 'superbloom_vs_cuco_bloom.cu',
         'deps': [cuco_dep],
     },
+    'fpr-fastx-sweep': {
+        'src': 'fpr_fastx_sweep.cu',
+        'deps': [cuco_dep],
+    },
 }
 
 foreach name, config : benchmarks
