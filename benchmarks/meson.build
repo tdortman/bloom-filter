@@ -1,21 +1,6 @@
 benchmark_dep = subproject('google-benchmark').get_variable('google_benchmark_dep')
 
-cmake = import('cmake')
-
-cuco_opts = cmake.subproject_options()
-cuco_opts.add_cmake_defines(
-    {
-        'CMAKE_BUILD_TYPE': 'Release',
-        'BUILD_TESTS': 'OFF',
-        'BUILD_TESTING': 'OFF',
-        'BUILD_BENCHMARKS': 'OFF',
-        'BUILD_EXAMPLES': 'OFF',
-        'INSTALL_CUCO': 'OFF',
-        'CUCO_ENABLE_EXPORTS': 'OFF',
-        'RAPIDS_ENABLE_EXPORTS': 'OFF',
-    },
-)
-cuco_dep = cmake.subproject('cuco', options: cuco_opts).dependency('cuco')
+cuco_dep = subproject('cuco').get_variable('cuco_dep')
 
 cuckoogpu_dep = subproject('cuckoogpu').get_variable('cuckoogpu_dep')
 
