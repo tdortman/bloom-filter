@@ -17,6 +17,15 @@ benchmarks += {
         'src': 'fpr_fastx_sweep.cu',
         'deps': [cuco_dep],
     },
+    'sh-sweep-sparse': {
+        'src': 'sh_sweep.cu',
+        'deps': [],
+    },
+    'sh-sweep-dense': {
+        'src': 'sh_sweep.cu',
+        'extra_args': ['-DSH_SWEEP_DENSE'],
+        'deps': [],
+    },
 }
 
 foreach name, config : benchmarks

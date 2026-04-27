@@ -40,25 +40,6 @@ static constexpr uint64_t kQuerySeed = 0xDEADBEEF;
 
 using CucoBloom = cuco::bloom_filter<uint64_t>;
 
-static std::vector<char> readFastxConcatenated(std::string_view path) {
-    auto input = bloom::detail::openFastxFile(path);
-    bloom::detail::FastxReader reader(input, path);
-    bloom::detail::FastxRecord record;
-
-    std::vector<char> sequence;
-    bool firstRecord = true;
-
-    while (reader.nextRecord(record)) {
-        if (!firstRecord) {
-            sequence.push_back('N');
-        }
-        firstRecord = false;
-        sequence.insert(sequence.end(), record.sequence.begin(), record.sequence.end());
-    }
-
-    return sequence;
-}
-
 static void prepareFastxData() {
     if (g_fastxData) {
         return;
@@ -71,7 +52,7 @@ static void prepareFastxData() {
     g_fastxData = std::make_unique<FastxData>();
 
     // Read insert FASTX
-    std::vector<char> hostInsert = readFastxConcatenated(g_insertFastxPath);
+    std::vector<char> hostInsert = benchmark_common::readFastxConcatenated(g_insertFastxPath);
     if (hostInsert.empty()) {
         std::cerr << "Error: FASTX file is empty or contains no sequences" << std::endl;
         std::exit(1);

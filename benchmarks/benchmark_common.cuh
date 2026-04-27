@@ -54,6 +54,27 @@ class GPUTimer {
     cudaEvent_t stop_{};
 };
 
+// Concatenate all records in a FASTA/FASTQ file into a single sequence,
+// with 'N' as a separatorbetween records
+std::vector<char> readFastxConcatenated(std::string_view path) {
+    auto input = bloom::detail::openFastxFile(path);
+    bloom::detail::FastxReader reader(input, path);
+    bloom::detail::FastxRecord record;
+
+    std::vector<char> sequence;
+    bool firstRecord = true;
+
+    while (reader.nextRecord(record)) {
+        if (!firstRecord) {
+            sequence.push_back('N');
+        }
+        firstRecord = false;
+        sequence.insert(sequence.end(), record.sequence.begin(), record.sequence.end());
+    }
+
+    return sequence;
+}
+
 inline void setCommonCounters(
     benchmark::State& state,
     uint64_t memoryBytes,
