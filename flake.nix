@@ -35,10 +35,20 @@
             extensions = [ "rust-src" ];
           };
 
+          cudaPackages = with cudaPkgs; [
+            cuda_nvcc
+            cuda_cudart
+            cuda_cccl
+            cuda_cuobjdump
+          ];
+
           cuda = {
             arch = "1200";
             smTarget = "sm_120";
-            path = cudaPkgs.cudatoolkit;
+            path = pkgs.symlinkJoin {
+              name = "cuda-dev-path";
+              paths = cudaPackages;
+            };
             version = {
               complete = cudaPkgs.cudaMajorMinorVersion;
               major = cudaPkgs.cudaMajorVersion;
@@ -46,9 +56,7 @@
             };
           };
 
-          buildInputs = [
-            cudaPkgs.cudatoolkit
-            cudaPkgs.cuda_cudart
+          buildInputs = cudaPackages ++ [
             pkgs.stdenv.cc.cc.lib
           ];
 
@@ -69,6 +77,7 @@
               rust-analyzer
               ninja
               llvm.clang
+              mold-unwrapped
             ]
             ++ [
               rustToolchain
