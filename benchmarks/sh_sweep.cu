@@ -159,6 +159,7 @@ class ShSweepFixture : public bm::Fixture {
         state.counters["num_kmers"] =
             benchmark::Counter(static_cast<double>(g_fastxData->insertKmers));
         state.counters["s"] = benchmark::Counter(static_cast<double>(Config::s));
+        state.counters["m"] = benchmark::Counter(static_cast<double>(Config::m));
         state.counters["hashes"] = benchmark::Counter(static_cast<double>(Config::hashCount));
         // Always emit these so the CSV contains the column for every operation.
         state.counters["fpr_percentage"] = 0.0;
@@ -289,50 +290,94 @@ void runShSweepFpr(Fixture& fixture, benchmark::State& state) {
     REGISTER_SH_SWEEP_BENCHMARK(FixtureName, Query);  \
     REGISTER_SH_SWEEP_BENCHMARK(FixtureName, FPR);
 
-// X-macro helpers: one H-list, reused for every S row.
-#define SH_SWEEP_H_SPARSE(M, K, S, M_) \
-    M(K, S, M_, 4)                     \
-    M(K, S, M_, 8)                     \
-    M(K, S, M_, 12)                    \
-    M(K, S, M_, 16)
+// X-macro helpers: one H-list, reused for every (S,M) pair.
+#define SH_SWEEP_H_SPARSE(MACRO, K, S, M) \
+    MACRO(K, S, M, 4)                     \
+    MACRO(K, S, M, 8)                     \
+    MACRO(K, S, M, 12)                    \
+    MACRO(K, S, M, 16)
 
-#define SH_SWEEP_H_DENSE(M, K, S, M_) \
-    M(K, S, M_, 4)                    \
-    M(K, S, M_, 5)                    \
-    M(K, S, M_, 6)                    \
-    M(K, S, M_, 7)                    \
-    M(K, S, M_, 8)                    \
-    M(K, S, M_, 9)                    \
-    M(K, S, M_, 10)                   \
-    M(K, S, M_, 11)                   \
-    M(K, S, M_, 12)                   \
-    M(K, S, M_, 13)                   \
-    M(K, S, M_, 14)                   \
-    M(K, S, M_, 15)                   \
-    M(K, S, M_, 16)
+#define SH_SWEEP_H_DENSE(MACRO, K, S, M) \
+    MACRO(K, S, M, 4)                    \
+    MACRO(K, S, M, 5)                    \
+    MACRO(K, S, M, 6)                    \
+    MACRO(K, S, M, 7)                    \
+    MACRO(K, S, M, 8)                    \
+    MACRO(K, S, M, 9)                    \
+    MACRO(K, S, M, 10)                   \
+    MACRO(K, S, M, 11)                   \
+    MACRO(K, S, M, 12)                   \
+    MACRO(K, S, M, 13)                   \
+    MACRO(K, S, M, 14)                   \
+    MACRO(K, S, M, 15)                   \
+    MACRO(K, S, M, 16)
 
-// Sparse grid (default): S in {20,24,28,31}, H in {4,8,12,16}, M = 21
-#define SH_SWEEP_APPLY_SPARSE(M)   \
-    SH_SWEEP_H_SPARSE(M, 31, 20, 21) \
-    SH_SWEEP_H_SPARSE(M, 31, 24, 21) \
-    SH_SWEEP_H_SPARSE(M, 31, 28, 21) \
-    SH_SWEEP_H_SPARSE(M, 31, 31, 21)
+// Sparse 3-D grid (default): SxMxH = 4x4x4 = 64 configs
+#define SH_SWEEP_APPLY_SPARSE(MACRO)       \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 20, 16)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 20, 21)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 20, 26)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 20, 31)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 24, 16)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 24, 21)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 24, 26)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 24, 31)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 28, 16)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 28, 21)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 28, 26)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 28, 31)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 31, 16)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 31, 21)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 31, 26)   \
+    SH_SWEEP_H_SPARSE(MACRO, 31, 31, 31)
 
-// Dense grid (SH_SWEEP_DENSE): S in [20..31], H in [4..16], M = 21
+// Dense 2-D grid (SH_SWEEP_DENSE): SxH with fixed M=21
 #ifdef SH_SWEEP_DENSE
-#define SH_SWEEP_APPLY_DENSE(M)    \
-    SH_SWEEP_H_DENSE(M, 31, 20, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 21, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 22, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 23, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 24, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 25, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 26, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 27, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 28, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 29, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 30, 21) \
-    SH_SWEEP_H_DENSE(M, 31, 31, 21)
+#define SH_SWEEP_APPLY_DENSE(MACRO)        \
+    SH_SWEEP_H_DENSE(MACRO, 31, 20, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 21, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 22, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 23, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 24, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 25, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 26, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 27, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 28, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 29, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 30, 21)    \
+    SH_SWEEP_H_DENSE(MACRO, 31, 31, 21)
+#endif
+
+// Dense 3-D grid (SH_SWEEP_DENSE3D): SxMxH = 5x4x5 = 100 configs
+#ifdef SH_SWEEP_DENSE3D
+#define SH_SWEEP_H_DENSE3D(MACRO, K, S, M) \
+    MACRO(K, S, M, 4)                      \
+    MACRO(K, S, M, 7)                      \
+    MACRO(K, S, M, 10)                     \
+    MACRO(K, S, M, 13)                     \
+    MACRO(K, S, M, 16)
+
+#define SH_SWEEP_APPLY_DENSE3D(MACRO)        \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 20, 16)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 20, 21)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 20, 26)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 20, 31)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 23, 16)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 23, 21)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 23, 26)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 23, 31)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 26, 16)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 26, 21)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 26, 26)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 26, 31)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 28, 16)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 28, 21)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 28, 26)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 28, 31)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 31, 16)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 31, 21)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 31, 26)    \
+    SH_SWEEP_H_DENSE3D(MACRO, 31, 31, 31)
 #endif
 
 // Instantiate configs, fixtures, benchmarks, and registrations
@@ -345,14 +390,18 @@ void runShSweepFpr(Fixture& fixture, benchmark::State& state) {
 #define SH_SWEEP_REGISTER_ALL_WRAPPER(K, S, M, H) \
     REGISTER_SH_SWEEP_ALL(BENCHMARK_SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H))
 
-#ifndef SH_SWEEP_DENSE
-SH_SWEEP_APPLY_SPARSE(SH_SWEEP_DEFINE_CONFIG_AND_FIXTURE_WRAPPER)
-SH_SWEEP_APPLY_SPARSE(SH_SWEEP_DEFINE_ALL_WRAPPER)
-SH_SWEEP_APPLY_SPARSE(SH_SWEEP_REGISTER_ALL_WRAPPER)
-#else
+#if defined(SH_SWEEP_DENSE3D)
+SH_SWEEP_APPLY_DENSE3D(SH_SWEEP_DEFINE_CONFIG_AND_FIXTURE_WRAPPER)
+SH_SWEEP_APPLY_DENSE3D(SH_SWEEP_DEFINE_ALL_WRAPPER)
+SH_SWEEP_APPLY_DENSE3D(SH_SWEEP_REGISTER_ALL_WRAPPER)
+#elif defined(SH_SWEEP_DENSE)
 SH_SWEEP_APPLY_DENSE(SH_SWEEP_DEFINE_CONFIG_AND_FIXTURE_WRAPPER)
 SH_SWEEP_APPLY_DENSE(SH_SWEEP_DEFINE_ALL_WRAPPER)
 SH_SWEEP_APPLY_DENSE(SH_SWEEP_REGISTER_ALL_WRAPPER)
+#else
+SH_SWEEP_APPLY_SPARSE(SH_SWEEP_DEFINE_CONFIG_AND_FIXTURE_WRAPPER)
+SH_SWEEP_APPLY_SPARSE(SH_SWEEP_DEFINE_ALL_WRAPPER)
+SH_SWEEP_APPLY_SPARSE(SH_SWEEP_REGISTER_ALL_WRAPPER)
 #endif
 
 static void parseCustomArgs(int argc, char** argv, std::vector<char*>& benchmarkArgv) {
