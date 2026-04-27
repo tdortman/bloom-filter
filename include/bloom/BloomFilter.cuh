@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cuda/algorithm>
 #include <cuda/std/bit>
 #include <cuda/std/span>
 #include <cuda/stream_ref>
@@ -541,7 +542,7 @@ class Filter {
             device_span<const char>{thrust::raw_pointer_cast(d_sequence_.data()), sequence.size()},
             stream
         );
-        BLOOM_CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        stream.sync();
         return totalKmers;
     }
 
@@ -649,7 +650,7 @@ class Filter {
             stream.get()
         ));
 
-        BLOOM_CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        stream.sync();
         return output;
     }
 
@@ -684,10 +685,14 @@ class Filter {
      * @param stream CUDA stream to use.
      */
     void clear(cuda::stream_ref stream = cudaStream_t{}) {
-        BLOOM_CUDA_CALL(cudaMemsetAsync(
-            thrust::raw_pointer_cast(d_shards_.data()), 0, sizeBytes(), stream.get()
-        ));
-        BLOOM_CUDA_CALL(cudaStreamSynchronize(stream.get()));
+        cuda::fill_bytes(
+            stream,
+            cuda::std::span<uint8_t>{
+                reinterpret_cast<uint8_t*>(thrust::raw_pointer_cast(d_shards_.data())), sizeBytes()
+            },
+            0
+        );
+        stream.sync();
     }
 
     /**
@@ -837,7 +842,7 @@ class Filter {
         cuda::stream_ref stream
     ) const {
         const uint64_t numKmers = d_sequence.size() - Config::k + 1;
-        BLOOM_CUDA_CALL(cudaMemsetAsync(d_output.data(), 0, d_output.size_bytes(), stream.get()));
+        cuda::fill_bytes(stream, d_output, 0);
         const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize);
 
         detail::containsSequenceKmersKernel<Config>
