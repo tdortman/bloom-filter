@@ -230,7 +230,7 @@ def main(
 
         plt.tight_layout()
         suffix = time_col.replace("_time", "")
-        pareto_path = output_dir / f"sh_sweep_pareto_{suffix}.pdf"
+        pareto_path = output_dir / f"param_sweep_pareto_{suffix}.pdf"
         pu.save_figure(
             fig, pareto_path, f"Pareto plot ({suffix}) saved to {pareto_path}"
         )

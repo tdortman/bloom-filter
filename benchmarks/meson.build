@@ -6,9 +6,7 @@ cuckoogpu_dep = subproject('cuckoogpu').get_variable('cuckoogpu_dep')
 
 bench_deps = [benchmark_dep, bloom_dep]
 
-benchmarks = {}
-
-benchmarks += {
+benchmarks = {
     'gpu-filter-comparison': {
         'src': 'gpu_filter_comparison.cu',
         'deps': [cuco_dep, cuckoogpu_dep],
@@ -17,21 +15,26 @@ benchmarks += {
         'src': 'fpr_fastx_sweep.cu',
         'deps': [cuco_dep],
     },
-    'sh-sweep-sparse': {
-        'src': 'sh_sweep.cu',
-        'deps': [],
-    },
-    'sh-sweep-dense': {
-        'src': 'sh_sweep.cu',
-        'extra_args': ['-DSH_SWEEP_DENSE'],
-        'deps': [],
-    },
-    'sh-sweep-dense3d': {
-        'src': 'sh_sweep.cu',
-        'extra_args': ['-DSH_SWEEP_DENSE3D'],
-        'deps': [],
-    },
 }
+
+if get_option('param_sweep').enabled()
+    benchmarks += {
+        'sh-sweep-sparse': {
+            'src': 'param_sweep.cu',
+            'deps': [],
+        },
+        'sh-sweep-dense': {
+            'src': 'param_sweep.cu',
+            'extra_args': ['-DPARAM_SWEEP_DENSE'],
+            'deps': [],
+        },
+        'sh-sweep-dense3d': {
+            'src': 'param_sweep.cu',
+            'extra_args': ['-DPARAM_SWEEP_DENSE3D'],
+            'deps': [],
+        },
+    }
+endif
 
 foreach name, config : benchmarks
     executable(
