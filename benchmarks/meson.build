@@ -18,22 +18,21 @@ benchmarks = {
 }
 
 if get_option('param_sweep').enabled()
-    benchmarks += {
-        'sh-sweep-sparse': {
-            'src': 'param_sweep.cu',
-            'deps': [],
-        },
-        'sh-sweep-dense': {
-            'src': 'param_sweep.cu',
-            'extra_args': ['-DPARAM_SWEEP_DENSE'],
-            'deps': [],
-        },
-        'sh-sweep-dense3d': {
-            'src': 'param_sweep.cu',
-            'extra_args': ['-DPARAM_SWEEP_DENSE3D'],
-            'deps': [],
-        },
-    }
+    s_values = [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    m_values = [8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 31]
+    num_m = m_values.length()
+    foreach s_idx : range(s_values.length())
+        foreach m_idx : range(num_m)
+            group_idx = s_idx * num_m + m_idx
+            benchmarks += {
+                'param-sweep-group@0@'.format(group_idx): {
+                    'src': 'param_sweep.cu',
+                    'extra_args': ['-DPARAM_SWEEP_GROUP=@0@'.format(group_idx)],
+                    'deps': [],
+                },
+            }
+        endforeach
+    endforeach
 endif
 
 foreach name, config : benchmarks

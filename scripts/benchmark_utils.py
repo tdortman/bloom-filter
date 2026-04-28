@@ -185,7 +185,7 @@ def merge_csv_files(
 
 
 def run_benchmarks_and_merge(
-    benchmarks: list[tuple[Path, Optional[dict], Optional[Callable[[str], str]]]],
+    benchmarks: list[tuple[Path, Optional[dict], Optional[Callable[[str], str]], Optional[list[str]]]],
     output: Path,
     show_progress: bool = True,
 ) -> None:
@@ -195,16 +195,16 @@ def run_benchmarks_and_merge(
     merge_csv_files for the common case of running several benchmarks.
 
     Args:
-        benchmarks: List of (executable, env, line_transformer) tuples,
-                    where env and line_transformer can be None
+        benchmarks: List of (executable, env, line_transformer, extra_args) tuples.
+                    env, line_transformer, and extra_args can be None.
         output: Output path for merged CSV
         show_progress: Whether to show progress messages
 
     Example:
         run_benchmarks_and_merge(
             [
-                (build_dir / "bench1", None, None),
-                (build_dir / "bench2", {"VAR": "value"}, lambda l: l.replace("X", "Y")),
+                (build_dir / "bench1", None, None, ["--flag"]),
+                (build_dir / "bench2", {"VAR": "value"}, lambda l: l.replace("X", "Y"), None),
             ],
             Path("output.csv")
         )
@@ -212,7 +212,11 @@ def run_benchmarks_and_merge(
     temp_csvs = []
 
     try:
-        for idx, (exe, env, transformer) in enumerate(benchmarks, 1):
+        for idx, entry in enumerate(benchmarks, 1):
+            exe = entry[0]
+            env = entry[1] if len(entry) > 1 else None
+            extra_args = entry[3] if len(entry) > 3 else None
+
             validate_executable(exe)
 
             if show_progress:
@@ -225,10 +229,10 @@ def run_benchmarks_and_merge(
                 temp_csv = Path(f.name)
 
             temp_csvs.append(temp_csv)
-            run_benchmark_to_csv(exe, temp_csv, env=env)
+            run_benchmark_to_csv(exe, temp_csv, env=env, extra_args=extra_args)
 
         # Merge all CSVs
-        transformers = [b[2] for b in benchmarks]
+        transformers = [b[2] if len(b) > 2 else None for b in benchmarks]
         merge_csv_files(temp_csvs, output, transformers)  # ty:ignore[invalid-argument-type]
 
     finally:
