@@ -105,6 +105,7 @@
                   - -D__CUDA_ARCH__=${cuda.arch}
                   - --cuda-gpu-arch=${cuda.smTarget}
                   - -D__CUDACC_EXTENDED_LAMBDA__
+                  - -DPARAM_SWEEP_GROUP
                 Remove:
                   - -Xcompiler=*
                   - -G
