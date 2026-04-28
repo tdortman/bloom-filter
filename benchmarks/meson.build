@@ -26,6 +26,11 @@ benchmarks += {
         'extra_args': ['-DSH_SWEEP_DENSE'],
         'deps': [],
     },
+    'sh-sweep-dense3d': {
+        'src': 'sh_sweep.cu',
+        'extra_args': ['-DSH_SWEEP_DENSE3D'],
+        'deps': [],
+    },
 }
 
 foreach name, config : benchmarks
