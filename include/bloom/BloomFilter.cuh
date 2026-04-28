@@ -5,7 +5,7 @@
 #include <cuda/algorithm>
 #include <cuda/std/bit>
 #include <cuda/std/span>
-#include <cuda/stream_ref>
+#include <cuda/stream>
 
 #include <cub/warp/warp_reduce.cuh>
 
