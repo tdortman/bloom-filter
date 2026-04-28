@@ -1048,7 +1048,7 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
  * @param  output  Per-k-mer result buffer (1 = present, 0 = absent).
  */
 template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 4)
+__global__ void __launch_bounds__(Config::cudaBlockSize, 6)
 containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
     device_span<const typename Filter<Config>::Shard> shards,
@@ -1133,7 +1133,8 @@ containsSequenceKmersKernel(
 
         const uint64_t minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
 
-        const uint32_t shardIdx = static_cast<uint32_t>(minimizerHash & (shards.size() - 1));
+        // Warp-level shard sharing.
+        const auto shardIdx = static_cast<uint32_t>(minimizerHash & (shards.size() - 1));
         const uint32_t peers = __match_any_sync(0xFFFFFFFFu, shardIdx);
         const int leader = __ffs(static_cast<int>(peers)) - 1;
 
