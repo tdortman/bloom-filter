@@ -843,7 +843,8 @@ class Filter {
     ) const {
         const uint64_t numKmers = d_sequence.size() - Config::k + 1;
         cuda::fill_bytes(stream, d_output, 0);
-        const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize);
+        constexpr uint64_t kStride = 4;
+        const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize * kStride);
 
         detail::containsSequenceKmersKernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
@@ -1047,13 +1048,13 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
  * @param  output  Per-k-mer result buffer (1 = present, 0 = absent).
  */
 template <typename Config>
-__global__ void containsSequenceKmersKernel(
+__global__ void __launch_bounds__(Config::cudaBlockSize, 4)
+containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
     device_span<const typename Filter<Config>::Shard> shards,
     device_span<uint8_t> output
 ) {
     // Each thread handles this many consecutive k-mers to amortise packing
-    // and (when minimizers repeat) shard loads.
     constexpr uint32_t kStride = 4;
     constexpr uint64_t sequenceTileBases = Config::cudaBlockSize * kStride + Config::k - 1;
 
@@ -1074,28 +1075,26 @@ __global__ void containsSequenceKmersKernel(
     );
 
     const uint64_t threadOffset = static_cast<uint64_t>(threadIdx.x) * kStride;
-    const uint64_t firstLocalIdx = threadOffset;
-    const bool hasAnyKmer = firstLocalIdx < blockKmers;
-
-    if (!hasAnyKmer) {
+    if (threadOffset >= blockKmers) {
         return;
     }
 
-    // Per-k-mer validity tracking when the tile contains invalid bases.
-    bool kmerValid[kStride];
+    // Bitmask: bit s set = k-mer at offset s is valid.
+    uint32_t kmerValidMask = 0;
     _Pragma("unroll")
-    for (bool& s : kmerValid) {
-        s = true;
+    for (uint32_t s = 0; s < kStride; ++s) {
+        if ((threadOffset + s) < blockKmers) {
+            kmerValidMask |= (1u << s);
+        }
     }
 
     if (!blockAllValid) {
         _Pragma("unroll")
         for (uint32_t s = 0; s < kStride; ++s) {
-            const uint64_t localIdx = threadOffset + s;
-            if (localIdx >= blockKmers) {
-                kmerValid[s] = false;
+            if (!(kmerValidMask & (1u << s))) {
                 continue;
             }
+            const uint64_t localIdx = threadOffset + s;
             bool valid = true;
             _Pragma("unroll")
             for (uint64_t i = 0; i < Config::k; ++i) {
@@ -1104,33 +1103,15 @@ __global__ void containsSequenceKmersKernel(
                     break;
                 }
             }
-            kmerValid[s] = valid;
-        }
-    }
-
-    // Find the first valid k-mer to start packing
-    // earlier invalid kmers are written as 0.
-    int firstValidPos = -1;
-    _Pragma("unroll")
-    for (uint32_t s = 0; s < kStride; ++s) {
-        if (kmerValid[s]) {
-            firstValidPos = static_cast<int>(s);
-            break;
-        }
-    }
-
-    if (firstValidPos < 0) {
-        for (uint32_t s = 0; s < kStride; ++s) {
-            const uint64_t kmerIndex = blockStartKmer + threadOffset + s;
-            if (kmerIndex < numKmers) {
-                output[kmerIndex] = 0;
+            if (!valid) {
+                kmerValidMask &= ~(1u << s);
             }
         }
-        return;
     }
 
-    // Pack the first valid k-mer from the shared tile.
-    uint64_t packedKmer = packKmerFromTile<Config::k>(sequenceTile, threadOffset + firstValidPos);
+    // Always pack from position 0.  Sliding propagates the packed value forward
+    // invalid bases from earlier k-mers are simply shifted out.
+    uint64_t packedKmer = packKmerFromTile<Config::k>(sequenceTile, threadOffset);
 
     for (uint32_t s = 0; s < kStride; ++s) {
         const uint64_t localIdx = threadOffset + s;
@@ -1140,24 +1121,23 @@ __global__ void containsSequenceKmersKernel(
 
         const uint64_t kmerIndex = blockStartKmer + localIdx;
 
-        if (!kmerValid[s]) {
-            output[kmerIndex] = 0;
-            continue;
-        }
-
-        if (s > static_cast<uint32_t>(firstValidPos)) {
+        if (s > 0) {
             packedKmer =
                 advancePackedKmer<Config::k>(packedKmer, sequenceTile[localIdx + Config::k - 1]);
         }
 
+        if (!(kmerValidMask & (1u << s))) {
+            output[kmerIndex] = 0;
+            continue;
+        }
+
         const uint64_t minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
 
-        // Warp-level shard sharing.
         const uint32_t shardIdx = static_cast<uint32_t>(minimizerHash & (shards.size() - 1));
         const uint32_t peers = __match_any_sync(0xFFFFFFFFu, shardIdx);
         const int leader = __ffs(static_cast<int>(peers)) - 1;
 
-        typename Config::WordType w[4] = {};
+        typename Config::WordType w[4];
         if (static_cast<int>(threadIdx.x & 31u) == leader) {
             loadShardWords4<Config>(shards.data(), shardIdx, w);
         }
