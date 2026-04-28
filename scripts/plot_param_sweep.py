@@ -185,7 +185,7 @@ def main(
         for _, row in subset[subset["pareto"]].iterrows():
             ox, oy = offsets[int(row["s"]) % 4]
             ax.annotate(
-                f"S{int(row['s'])},H{int(row['h'])}",
+                f"S{int(row['s'])},M{int(row['m'])},H{int(row['h'])}",
                 (row["fpr"], row[time_col]),
                 textcoords="offset points",
                 xytext=(ox, oy),
