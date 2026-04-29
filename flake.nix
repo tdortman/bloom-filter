@@ -69,6 +69,7 @@
               rust-analyzer
               ninja
               llvm.clang
+              cmake
             ]
             ++ [
               rustToolchain
