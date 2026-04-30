@@ -1047,7 +1047,7 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
  * @param  output  Per-k-mer result buffer (1 = present, 0 = absent).
  */
 template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 6) containsSequenceKmersKernel(
+__global__ __launch_bounds__(Config::cudaBlockSize, 6) void containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
     device_span<const typename Filter<Config>::Shard> shards,
     device_span<uint8_t> output

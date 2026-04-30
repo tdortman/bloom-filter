@@ -5,7 +5,8 @@ GENERATE_HTML          = YES
 GENERATE_LATEX         = NO
 FULL_PATH_NAMES        = NO
 USE_MDFILE_AS_MAINPAGE = README.md
-PREDEFINED             = __CUDA_ARCH__=1200
+PREDEFINED             = __CUDA_ARCH__=1200 \
+                         "__launch_bounds__(x,y)="
 
 # Inputs
 INPUT                  = include, README.md
