@@ -80,6 +80,26 @@ TEST_F(BloomFilterTest, QueryFastxFileDoesNotCreateCrossRecordKmers) {
     EXPECT_EQ(report.positiveKmers, report.queriedKmers);
 }
 
+TEST_F(BloomFilterTest, FastxReportsOnlyValidKmers) {
+    bloom::Filter<TestConfig> filter(1 << 12);
+
+    const auto file = writeTempFile(
+        ">with-invalid\n"
+        "ACGTNACGTACGTA\n"
+    );
+
+    const auto insertReport = filter.insertFastxFile(file.path);
+    const auto queryReport = filter.queryFastxFile(file.path);
+
+    EXPECT_EQ(insertReport.recordsIndexed, 1);
+    EXPECT_EQ(insertReport.indexedBases, 14);
+    EXPECT_EQ(insertReport.insertedKmers, 5);
+    EXPECT_EQ(queryReport.recordsQueried, 1);
+    EXPECT_EQ(queryReport.queriedBases, 14);
+    EXPECT_EQ(queryReport.queriedKmers, 5);
+    EXPECT_EQ(queryReport.positiveKmers, 5);
+}
+
 TEST_F(BloomFilterTest, MalformedFastqThrowsOnQualityLengthMismatch) {
     bloom::Filter<TestConfig> filter(1 << 12);
 

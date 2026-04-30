@@ -137,7 +137,6 @@ class CuckooGpuFixture : public bm::Fixture {
     benchmark_common::GPUTimer timer;
 };
 
-
 void runCucoInsertBenchmark(CucoBloomFixture& fixture, bm::State& state) {
     for (auto _ : state) {
         fixture.filter->clear();
@@ -221,7 +220,6 @@ void runCucoFprBenchmark(CucoBloomFixture& fixture, bm::State& state) {
     benchmark_common::setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
-
 void runCuckooGpuInsertBenchmark(CuckooGpuFixture& fixture, bm::State& state) {
     for (auto _ : state) {
         fixture.filter->clear();
@@ -287,7 +285,6 @@ void runCuckooGpuFprBenchmark(CuckooGpuFixture& fixture, bm::State& state) {
     benchmark_common::setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
-
 BENCHMARK_DEFINE_F(CucoBloomFixture, Insert)(bm::State& state) {
     runCucoInsertBenchmark(*this, state);
 }
@@ -323,7 +320,6 @@ SUPERBLOOM_CONFIGS_FPR_ONLY(DEFINE_SUPERBLOOM_FPR_ONLY_BENCHMARKS)
 
 #undef DEFINE_SUPERBLOOM_FPR_ONLY_BENCHMARKS
 #undef DEFINE_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS
-
 
 #define REGISTER_SUPERBLOOM_INSERT_QUERY_FPR_BENCHMARKS(K, S, M, H) \
     BENCHMARK_REGISTER_SUPERBLOOM_ALL(BENCHMARK_SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H))

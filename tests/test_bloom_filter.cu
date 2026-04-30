@@ -147,3 +147,39 @@ TEST_F(BloomFilterTest, LowercaseInsertionMatchesUppercaseQuery) {
     EXPECT_TRUE(allOnes(upperHits));
     EXPECT_TRUE(allOnes(lowerHits));
 }
+
+TEST_F(BloomFilterTest, ProteinAlphabetInsertAndQuerySameSequenceHasNoFalseNegatives) {
+    bloom::Filter<ProteinTestConfig> filter(1 << 12);
+
+    const std::string sequence = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const uint64_t inserted = filter.insertSequence(sequence);
+    const auto hits = filter.containsSequence(sequence);
+
+    ASSERT_EQ(inserted, sequence.size() - ProteinTestConfig::k + 1);
+    ASSERT_EQ(hits.size(), inserted);
+    EXPECT_TRUE(allOnes(hits));
+}
+
+TEST_F(BloomFilterTest, ProteinAlphabetLowercaseMatchesUppercaseQuery) {
+    bloom::Filter<ProteinTestConfig> filter(1 << 12);
+
+    const std::string lowerSequence = "abcdefghijklmnopqrstuvwxyz";
+    const std::string upperSequence = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    (void)filter.insertSequence(lowerSequence);
+
+    EXPECT_TRUE(allOnes(filter.containsSequence(upperSequence)));
+    EXPECT_TRUE(allOnes(filter.containsSequence(lowerSequence)));
+}
+
+TEST_F(BloomFilterTest, ProteinAlphabetInvalidSymbolsResetForwardWindows) {
+    bloom::Filter<ProteinTestConfig> filter(1 << 12);
+
+    const std::string sequence = "ACDE*ACDEFGHI";
+    const auto inserted = filter.insertSequence(sequence);
+    const auto hits = filter.containsSequence(sequence);
+
+    EXPECT_EQ(inserted, hits.size());
+    const std::vector<uint8_t> expected = {0, 0, 0, 0, 0, 1, 1, 1, 1};
+    EXPECT_EQ(hits, expected);
+}

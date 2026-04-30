@@ -148,8 +148,10 @@ inline void gpuGeneratePackedKmers(
     );
 }
 
-template <uint64_t K>
+template <uint64_t K, typename Alphabet = bloom::DnaAlphabet>
 __global__ void encodePackedKmersKernel(const char* sequence, uint64_t numKmers, uint64_t* output) {
+    constexpr uint64_t symbolBits = cuda::std::bit_width(Alphabet::symbolCount - 1);
+    constexpr uint64_t symbolMask = (uint64_t{1} << symbolBits) - 1;
     const uint64_t idx = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= numKmers) {
         return;
@@ -157,13 +159,13 @@ __global__ void encodePackedKmersKernel(const char* sequence, uint64_t numKmers,
 
     uint64_t packed = 0;
     for (uint64_t i = 0; i < K; ++i) {
-        const uint8_t encoded = bloom::detail::encodeBase(static_cast<uint8_t>(sequence[idx + i]));
-        packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3);
+        const uint8_t encoded = Alphabet::encode(sequence[idx + i]);
+        packed = (packed << symbolBits) | (encoded & symbolMask);
     }
     output[idx] = packed;
 }
 
-template <uint64_t K>
+template <uint64_t K, typename Alphabet = bloom::DnaAlphabet>
 inline void gpuEncodePackedKmers(
     const char* d_sequence,
     uint64_t sequenceLength,
@@ -176,7 +178,9 @@ inline void gpuEncodePackedKmers(
     }
     constexpr uint64_t blockSize = 256;
     const uint64_t gridSize = bloom::detail::divUp(numKmers, blockSize);
-    encodePackedKmersKernel<K><<<gridSize, blockSize, 0, stream>>>(d_sequence, numKmers, d_output);
+    encodePackedKmersKernel<K, Alphabet><<<gridSize, blockSize, 0, stream>>>(
+        d_sequence, numKmers, d_output
+    );
 }
 
 template <uint64_t K>

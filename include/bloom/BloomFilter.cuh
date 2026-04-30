@@ -16,6 +16,7 @@
 #include <thrust/transform_reduce.h>
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -24,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "Alphabet.cuh"
 #include "device_span.cuh"
 #include "Fastx.hpp"
 #include "hashutil.cuh"
@@ -35,7 +37,7 @@ namespace bloom {
  * @brief Compile-time configuration for a bloom::Filter.
  *
  * All filter behaviour (k-mer length, minimizer width, s-mer width, hash
- * count, CUDA block size, and word type) is encoded in this struct so that
+ * count, CUDA block size, and alphabet) is encoded in this struct so that
  * separate configurations produce completely independent Filter types with
  * zero run-time overhead.
  *
@@ -44,7 +46,7 @@ namespace bloom {
  * @tparam M_             minimizer width used for shard selection (1-k).
  * @tparam HashCount_     number of independent Bloom hash functions (1-16).
  * @tparam CudaBlockSize_ CUDA threads per block (multiple of 32, default 256).
- * @tparam WordType_      backing integer for filter bits (uint32_t or uint64_t).
+ * @tparam Alphabet_      byte-to-symbol alphabet encoding.
  */
 template <
     uint16_t K_,
@@ -52,18 +54,21 @@ template <
     uint16_t M_,
     uint64_t HashCount_,
     uint64_t CudaBlockSize_ = 256,
-    typename WordType_ = uint64_t>
+    Alphabet Alphabet_ = DnaAlphabet>
 struct Config {
-    using WordType = WordType_;
+    using Alphabet = Alphabet_;
 
     static constexpr uint16_t k = K_;
     static constexpr uint16_t m = M_;
     static constexpr uint16_t s = S_;
     static constexpr uint64_t hashCount = HashCount_;
+    static constexpr uint64_t alphabetSize = Alphabet::symbolCount;
+    static constexpr uint64_t symbolBits = cuda::std::bit_width(alphabetSize - 1);
+    static constexpr uint64_t symbolMask = (uint64_t{1} << symbolBits) - 1;
     static constexpr uint64_t filterBlockBits = 256;
     static constexpr uint64_t cudaBlockSize = CudaBlockSize_;
 
-    static constexpr uint64_t wordBits = sizeof(WordType) * 8;
+    static constexpr uint64_t wordBits = 64;
     static constexpr uint64_t blockWordCount = filterBlockBits / wordBits;
     static constexpr uint64_t minimizerSpan = k - m + 1;
     static constexpr uint64_t findereSpan = k - s + 1;
@@ -74,15 +79,15 @@ struct Config {
     static_assert(k > 0, "k must be positive");
     static_assert(m > 0 && m <= k, "m must satisfy 0 < m <= k");
     static_assert(s > 0 && s <= k, "s must satisfy 0 < s <= k");
-    static_assert(k <= 32, "This first implementation supports k <= 32");
-    static_assert(m <= 32, "This first implementation supports m <= 32");
-    static_assert(s <= 32, "This first implementation supports s <= 32");
+    static_assert(k * symbolBits <= 64, "k-mer must fit in one packed uint64_t");
+    static_assert(m * symbolBits <= 64, "m-mer must fit in one packed uint64_t");
+    static_assert(s * symbolBits <= 64, "s-mer must fit in one packed uint64_t");
+    static_assert(
+        Alphabet::encode(Alphabet::separator) >= alphabetSize,
+        "Alphabet separator must encode as an invalid symbol"
+    );
     static_assert(hashCount > 0, "At least one Bloom hash is required");
     static_assert(hashCount <= 16, "This implementation provides 16 multiplicative salts");
-    static_assert(
-        std::is_same_v<WordType, uint32_t> || std::is_same_v<WordType, uint64_t>,
-        "WordType must be uint32_t or uint64_t"
-    );
     static_assert(filterBlockBits >= wordBits, "Filter block must contain at least one word");
     static_assert(
         cuda::std::has_single_bit(filterBlockBits),
@@ -264,80 +269,18 @@ __host__ __device__ __forceinline__ void forEachHashIndex(Fn&& fn) {
 }
 
 /**
- * @brief Encodes a nucleotide character to a 2-bit value.
+ * @brief Returns a bitmask covering @p Length packed alphabet symbols.
  *
- * Maps A/a→0, C/c→1, T/t→2, G/g→3. Any other character returns 0xFF.
+ * Returns @c UINT64_MAX when the packed window consumes all 64 bits.
  *
- * @param base  ASCII nucleotide character.
- * @return 2-bit encoding, or 0xFF for invalid input.
+ * @tparam Length Number of symbols.
  */
-constexpr __host__ __device__ __forceinline__ uint8_t encodeBase(uint8_t base) {
-    const uint8_t upper = base & 0xDFu;   // force upper for validation only
-    const uint8_t x = (base >> 1u) & 3u;  // A=0, C=1, T=2, G=3
-    const int valid = (upper == 'A') | (upper == 'C') | (upper == 'G') | (upper == 'T');
-
-    // Turn valid (0 or 1) into mask (0x00 or 0xFF)
-    const uint8_t mask = -valid;
-    return (x & mask) | (0xFFu & ~mask);
-}
-
-/**
- * @brief Encodes @p Length already-encoded bases into a packed 2-bit integer.
- *
- * @tparam Length  Window size in bases.
- * @param  encodedSequence  Pre-encoded base array.
- * @param  start            Start position.
- * @param  packed           Output packed representation.
- * @return @c true if all bases in the window are valid (encoded value \<= 3).
- */
-template <uint64_t Length>
-__device__ __forceinline__ bool
-encodeWindow(const uint8_t* encodedSequence, uint64_t start, uint64_t& packed) {
-    packed = 0;
-    uint8_t invalid = 0;
-    _Pragma("unroll")
-    for (uint64_t i = 0; i < Length; ++i) {
-        const uint8_t encoded = encodedSequence[start + i];
-        invalid |= static_cast<uint8_t>(encoded >> 2);
-        packed = (packed << 2) | static_cast<uint64_t>(encoded & 0x3u);
-    }
-    return invalid == 0;
-}
-
-/**
- * @brief Packs @p Length pre-encoded bases into a 2-bit integer without validity checking.
- *
- * @tparam Length       Window size in bases.
- * @tparam EncodedType  Element type of @p sequence.
- * @param  sequence     Pre-encoded base array.
- * @param  start        Start index.
- * @return Packed 2-bit representation.
- */
-template <uint64_t Length, typename EncodedType>
-[[nodiscard]] __device__ __forceinline__ uint64_t
-packEncodedWindowUnchecked(const EncodedType* sequence, uint64_t start) {
-    uint64_t packed = 0;
-    // _Pragma("unroll")
-    for (uint64_t i = 0; i < Length; ++i) {
-        packed = (packed << 2) |
-                 (static_cast<uint64_t>(static_cast<uint8_t>(sequence[start + i]) & 0x3u));
-    }
-    return packed;
-}
-
-/**
- * @brief Returns a bitmask covering @p Length packed 2-bit bases.
- *
- * Returns @c UINT64_MAX when @p Length >= 32.
- *
- * @tparam Length Number of bases.
- */
-template <uint64_t Length>
+template <typename Config, uint64_t Length>
 [[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t packedWindowMask() {
-    if constexpr (Length >= 32) {
+    if constexpr (Length * Config::symbolBits >= 64) {
         return std::numeric_limits<uint64_t>::max();
     } else {
-        return (uint64_t{1} << (2 * Length)) - 1;
+        return (uint64_t{1} << (Config::symbolBits * Length)) - 1;
     }
 }
 
@@ -353,32 +296,22 @@ template <uint64_t Length>
  * @param  start         Zero-based start position.
  * @return Packed sub-window.
  */
-template <uint64_t WindowLength, uint64_t K>
+template <typename Config, uint64_t WindowLength, uint64_t K>
 [[nodiscard]] __host__ __device__ __forceinline__ constexpr uint64_t
 extractPackedSubwindow(uint64_t packedKmer, uint64_t start) {
     static_assert(WindowLength <= K, "WindowLength must not exceed K");
-    return (packedKmer >> (2 * (K - (start + WindowLength)))) & packedWindowMask<WindowLength>();
+    return (packedKmer >> (Config::symbolBits * (K - (start + WindowLength)))) &
+           packedWindowMask<Config, WindowLength>();
 }
 
 /**
  * @brief Atomically ORs @p value into the device word at @p ptr.
  *
- * Dispatches to @c atomicOr with the appropriate reinterpret_cast depending
- * on whether @p WordType is uint32_t or uint64_t.
- *
- * @tparam WordType  uint32_t or uint64_t.
  * @param  ptr       Target device word.
  * @param  value     Value to OR in.
  */
-template <typename WordType>
-__device__ __forceinline__ void atomicOrWord(WordType* ptr, WordType value) {
-    if constexpr (std::is_same_v<WordType, uint64_t>) {
-        atomicOr(
-            reinterpret_cast<unsigned long long*>(ptr), static_cast<unsigned long long>(value)
-        );
-    } else {
-        atomicOr(reinterpret_cast<unsigned int*>(ptr), static_cast<unsigned int>(value));
-    }
+__device__ __forceinline__ void atomicOrWord(uint64_t* ptr, uint64_t value) {
+    atomicOr(reinterpret_cast<unsigned long long*>(ptr), static_cast<unsigned long long>(value));
 }
 
 }  // namespace detail
@@ -398,8 +331,6 @@ __device__ __forceinline__ void atomicOrWord(WordType* ptr, WordType value) {
 template <typename Config>
 class Filter {
    public:
-    using WordType = typename Config::WordType;
-
     /**
      * @brief One 256-bit filter block stored as an array of Config::blockWordCount words.
      *
@@ -418,7 +349,7 @@ class Filter {
         static constexpr uint64_t sliceWidth = 64 / Config::hashCount;
         static constexpr bool useBitSlicing = sliceWidth >= wordBitsLog2;
 
-        WordType words[wordCount];
+        uint64_t words[wordCount];
 
         /**
          * @brief Maps a base hash to a bit position within word sector @p HashIndex.
@@ -442,7 +373,7 @@ class Filter {
                 return (baseHash >> (sliceWidth * HashIndex)) & wordMask;
             } else {
                 const uint64_t mixed = baseHash * detail::multiplicativeSaltLiteral<HashIndex>();
-                return static_cast<uint64_t>(mixed >> hashShift);
+                return mixed >> hashShift;
             }
         }
 
@@ -460,16 +391,16 @@ class Filter {
          */
         __device__ __forceinline__ static void sectorizedHashToMasks(
             uint64_t baseHash,
-            WordType& mask0,
-            WordType& mask1,
-            WordType& mask2,
-            WordType& mask3
+            uint64_t& mask0,
+            uint64_t& mask1,
+            uint64_t& mask2,
+            uint64_t& mask3
         ) {
             detail::forEachHashIndex<Config>(
                 [&]<uint64_t HashIndex>(std::integral_constant<uint64_t, HashIndex>) {
                     constexpr uint64_t s = HashIndex % Config::blockWordCount;
                     const uint64_t bitPos = sectorizedBitAddress<HashIndex>(baseHash);
-                    const WordType bit = WordType{1} << bitPos;
+                    const uint64_t bit = uint64_t{1} << bitPos;
                     // clang-format off
                     if      constexpr (s == 0) mask0 |= bit;
                     else if constexpr (s == 1) mask1 |= bit;
@@ -481,10 +412,7 @@ class Filter {
         }
     };
 
-    static_assert(
-        Config::blockWordCount == 4 && std::is_same_v<WordType, uint64_t>,
-        "Filter only supports the fused 256-bit uint64_t shard path"
-    );
+    static_assert(Config::blockWordCount == 4, "Filter only supports the fused 256-bit shard path");
     static_assert(
         Config::queryGroupSize == 1,
         "Fused path expects Theta=1 independent query mapping"
@@ -702,13 +630,13 @@ class Filter {
      */
     [[nodiscard]] float loadFactor() const {
         const auto* wordsBegin =
-            reinterpret_cast<const WordType*>(thrust::raw_pointer_cast(d_shards_.data()));
+            reinterpret_cast<const uint64_t*>(thrust::raw_pointer_cast(d_shards_.data()));
         const uint64_t totalWords = numShards_ * Config::blockWordCount;
         const uint64_t setBits = thrust::transform_reduce(
             thrust::device,
             wordsBegin,
             wordsBegin + totalWords,
-            [] __device__(WordType w) -> uint64_t { return cuda::std::popcount(w); },
+            [] __device__(uint64_t w) -> uint64_t { return cuda::std::popcount(w); },
             uint64_t{0},
             cuda::std::plus<uint64_t>()
         );
@@ -726,6 +654,11 @@ class Filter {
     }
 
    private:
+    struct FastxRecordRange {
+        uint64_t offset{};
+        uint64_t size{};
+    };
+
     uint64_t numShards_{};
     uint64_t filterBits_{};
 
@@ -738,17 +671,67 @@ class Filter {
         return numShards() * sizeof(Shard);
     }
 
+    [[nodiscard]] static uint64_t recordKmerCount(uint64_t bases) {
+        return bases < Config::k ? 0 : bases - Config::k + 1;
+    }
+
+    [[nodiscard]] static uint64_t validRecordKmerCount(std::string_view sequence) {
+        if (sequence.size() < Config::k) {
+            return 0;
+        }
+
+        uint64_t invalidSymbols = 0;
+        for (uint64_t i = 0; i < Config::k; ++i) {
+            invalidSymbols += Config::Alphabet::encode(sequence[i]) >= Config::alphabetSize;
+        }
+
+        uint64_t validKmers = invalidSymbols == 0 ? 1 : 0;
+        for (uint64_t start = 1; start < recordKmerCount(sequence.size()); ++start) {
+            invalidSymbols -= Config::Alphabet::encode(sequence[start - 1]) >= Config::alphabetSize;
+            invalidSymbols +=
+                Config::Alphabet::encode(sequence[start + Config::k - 1]) >= Config::alphabetSize;
+            validKmers += invalidSymbols == 0;
+        }
+        return validKmers;
+    }
+
+    static void appendFastxRecord(std::string& sequence, std::string_view recordSequence) {
+        if (!sequence.empty()) {
+            sequence.push_back(static_cast<char>(Config::Alphabet::separator));
+        }
+        sequence.append(recordSequence);
+    }
+
+    static void appendFastxRecordWithRange(
+        std::string& sequence,
+        std::vector<FastxRecordRange>& ranges,
+        std::string_view recordSequence
+    ) {
+        if (!sequence.empty()) {
+            sequence.push_back(static_cast<char>(Config::Alphabet::separator));
+        }
+        const uint64_t offset = sequence.size();
+        sequence.append(recordSequence);
+        ranges.push_back(FastxRecordRange{offset, recordSequence.size()});
+    }
+
     /// @brief Internal implementation shared by insertFastx() and insertFastxFile().
     [[nodiscard]] FastxInsertReport
     insertFastxStream(std::istream& input, std::string_view sourceName, cuda::stream_ref stream) {
         detail::FastxReader reader(input, sourceName);
         detail::FastxRecord record;
         FastxInsertReport report;
+        std::string sequence;
 
         while (reader.nextRecord(record)) {
             ++report.recordsIndexed;
             report.indexedBases += record.sequence.size();
-            report.insertedKmers += insertSequence(record.sequence, stream);
+            report.insertedKmers += validRecordKmerCount(record.sequence);
+            appendFastxRecord(sequence, record.sequence);
+        }
+
+        if (!sequence.empty()) {
+            (void)insertSequence(sequence, stream);
         }
         return report;
     }
@@ -762,14 +745,29 @@ class Filter {
         detail::FastxReader reader(input, sourceName);
         detail::FastxRecord record;
         FastxQueryReport report;
+        std::string sequence;
+        std::vector<FastxRecordRange> ranges;
 
         while (reader.nextRecord(record)) {
             ++report.recordsQueried;
             report.queriedBases += record.sequence.size();
+            report.queriedKmers += validRecordKmerCount(record.sequence);
+            appendFastxRecordWithRange(sequence, ranges, record.sequence);
+        }
 
-            const auto hits = containsSequence(record.sequence, stream);
-            report.queriedKmers += hits.size();
-            report.positiveKmers += std::count(hits.begin(), hits.end(), uint8_t{1});
+        if (!sequence.empty()) {
+            const auto hits = containsSequence(sequence, stream);
+            for (const FastxRecordRange range : ranges) {
+                const uint64_t kmers = recordKmerCount(range.size);
+                if (kmers == 0) {
+                    continue;
+                }
+                report.positiveKmers += std::count(
+                    hits.begin() + static_cast<std::ptrdiff_t>(range.offset),
+                    hits.begin() + static_cast<std::ptrdiff_t>(range.offset + kmers),
+                    uint8_t{1}
+                );
+            }
         }
         return report;
     }
@@ -893,7 +891,7 @@ template <typename Config>
     _Pragma("unroll")
     for (uint64_t offset = 0; offset < Config::minimizerSpan; ++offset) {
         const uint64_t packedMmer =
-            extractPackedSubwindow<Config::m, Config::k>(packedKmer, offset);
+            extractPackedSubwindow<Config, Config::m, Config::k>(packedKmer, offset);
         minimizerHash = min(minimizerHash, detail::minimizerHash64(packedMmer));
     }
     return minimizerHash;
@@ -910,7 +908,8 @@ template <typename Config>
 template <typename Config>
 [[nodiscard]] __device__ __forceinline__ uint64_t
 packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
-    const uint64_t packedSmer = extractPackedSubwindow<Config::s, Config::k>(packedKmer, start);
+    const uint64_t packedSmer =
+        extractPackedSubwindow<Config, Config::s, Config::k>(packedKmer, start);
     return detail::hash64(packedSmer);
 }
 
@@ -926,11 +925,8 @@ packedKmerSmerHash(uint64_t packedKmer, uint64_t start) {
  * @param  w           Output array of (at least) four words.
  */
 template <typename Config>
-__device__ __forceinline__ void loadShardWords4(
-    const typename Filter<Config>::Shard* shards,
-    uint64_t shardIndex,
-    typename Filter<Config>::WordType* w
-) {
+__device__ __forceinline__ void
+loadShardWords4(const typename Filter<Config>::Shard* shards, uint64_t shardIndex, uint64_t* w) {
 #if __CUDA_ARCH__ >= 1000
     detail::load256BitGlobalNC(shards[shardIndex].words, w[0], w[1], w[2], w[3]);
 #else
@@ -940,37 +936,38 @@ __device__ __forceinline__ void loadShardWords4(
 }
 
 /**
- * @brief Packs @p K bases from a shared-memory tile into a 2-bit integer.
+ * @brief Packs @p K symbols from a shared-memory tile into an integer.
  *
  * @tparam K     k-mer length.
- * @param  tile  Encoded base tile in shared memory.
+ * @param  tile  Encoded symbol tile in shared memory.
  * @param  start Start position within the tile.
- * @return Packed 2-bit k-mer.
+ * @return Packed k-mer.
  */
-template <uint64_t K>
+template <typename Config, uint64_t K>
 __device__ __forceinline__ uint64_t packKmerFromTile(const uint8_t* tile, uint64_t start) {
     uint64_t packed = 0;
     _Pragma("unroll")
     for (uint64_t i = 0; i < K; ++i) {
-        packed = (packed << 2) | static_cast<uint64_t>(tile[start + i] & 0x3u);
+        packed = (packed << Config::symbolBits) | (tile[start + i] & Config::symbolMask);
     }
     return packed;
 }
 
 /**
- * @brief Slides the packed k-mer window forward by one base.
+ * @brief Slides the packed k-mer window forward by one symbol.
  *
- * Shifts the existing packed representation left by 2 bits, inserts the
- * new base in the least-significant position, and masks to @p K bases.
+ * Shifts the existing packed representation left by one symbol, inserts the
+ * new symbol in the least-significant position, and masks to @p K symbols.
  *
  * @tparam K       k-mer length.
  * @param  packed  Current packed k-mer.
- * @param  newBase Pre-encoded new base (bits 1:0 used).
+ * @param  newBase Pre-encoded new symbol.
  * @return Updated packed k-mer.
  */
-template <uint64_t K>
+template <typename Config, uint64_t K>
 __device__ __forceinline__ uint64_t advancePackedKmer(uint64_t packed, uint8_t newBase) {
-    return ((packed << 2) | static_cast<uint64_t>(newBase & 0x3u)) & packedWindowMask<K>();
+    return ((packed << Config::symbolBits) | (newBase & Config::symbolMask)) &
+           packedWindowMask<Config, K>();
 }
 
 /**
@@ -980,13 +977,13 @@ __device__ __forceinline__ uint64_t advancePackedKmer(uint64_t packed, uint8_t n
  * Returns @c false as soon as any required bit is absent.
  *
  * @tparam Config     Filter configuration.
- * @param  packedKmer 2-bit packed k-mer to query.
+ * @param  packedKmer Packed k-mer to query.
  * @param  w          The four pre-loaded shard words.
  * @return @c true if all required bits are set.
  */
 template <typename Config>
 __device__ __forceinline__ bool
-sectorizedContainsPackedKmer(uint64_t packedKmer, const typename Filter<Config>::WordType* w) {
+sectorizedContainsPackedKmer(uint64_t packedKmer, const uint64_t* w) {
     bool present = true;
     _Pragma("unroll")
     for (uint64_t smerOffset = 0; smerOffset < Config::findereSpan; ++smerOffset) {
@@ -1004,18 +1001,18 @@ sectorizedContainsPackedKmer(uint64_t packedKmer, const typename Filter<Config>:
 }
 
 /**
- * @brief Cooperatively loads and encodes a tile of bases into shared memory.
+ * @brief Cooperatively loads and encodes a tile of symbols into shared memory.
  *
  * All threads in the block participate. The return value (via
  * @c __syncthreads_count) is @c true only if every base in the tile is a
- * valid nucleotide.
+ * valid alphabet symbol.
  *
  * @tparam Config         Filter configuration.
  * @param  sequence       Device-resident sequence pointer.
  * @param  blockStartKmer Index of the first k-mer assigned to this block.
  * @param  blockKmers     Number of k-mers handled by this block.
  * @param  sequenceTile   Shared-memory output buffer (blockKmers + k - 1 bytes).
- * @return @c true if no invalid bases are present in the tile.
+ * @return @c true if no invalid symbols are present in the tile.
  */
 template <typename Config>
 __device__ __forceinline__ bool prepareSequenceHashTiles(
@@ -1028,9 +1025,9 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
 
     bool localInvalidBase = false;
     for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
-        const uint8_t encodedBase = encodeBase(sequence[blockStartKmer + idx]);
+        const uint8_t encodedBase = Config::Alphabet::encode(sequence[blockStartKmer + idx]);
         sequenceTile[idx] = encodedBase;
-        localInvalidBase = localInvalidBase || (encodedBase > 3);
+        localInvalidBase |= (encodedBase >= Config::alphabetSize);
     }
     return __syncthreads_count(localInvalidBase) == 0;
 }
@@ -1048,8 +1045,7 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
  * @param  output  Per-k-mer result buffer (1 = present, 0 = absent).
  */
 template <typename Config>
-__global__ void __launch_bounds__(Config::cudaBlockSize, 6)
-containsSequenceKmersKernel(
+__global__ void __launch_bounds__(Config::cudaBlockSize, 6) containsSequenceKmersKernel(
     SequenceKmerInput<Config> input,
     device_span<const typename Filter<Config>::Shard> shards,
     device_span<uint8_t> output
@@ -1067,8 +1063,7 @@ containsSequenceKmersKernel(
         return;
     }
 
-    const uint64_t blockKmers =
-        min(static_cast<uint64_t>(Config::cudaBlockSize) * kStride, numKmers - blockStartKmer);
+    const uint64_t blockKmers = min(Config::cudaBlockSize * kStride, numKmers - blockStartKmer);
 
     const bool blockAllValid = prepareSequenceHashTiles<Config>(
         input.sequence.data(), blockStartKmer, blockKmers, sequenceTile
@@ -1098,7 +1093,7 @@ containsSequenceKmersKernel(
             bool valid = true;
             _Pragma("unroll")
             for (uint64_t i = 0; i < Config::k; ++i) {
-                if (sequenceTile[localIdx + i] > 3) {
+                if (sequenceTile[localIdx + i] >= Config::alphabetSize) {
                     valid = false;
                     break;
                 }
@@ -1111,7 +1106,7 @@ containsSequenceKmersKernel(
 
     // Always pack from position 0.  Sliding propagates the packed value forward
     // invalid bases from earlier k-mers are simply shifted out.
-    uint64_t packedKmer = packKmerFromTile<Config::k>(sequenceTile, threadOffset);
+    uint64_t packedKmer = packKmerFromTile<Config, Config::k>(sequenceTile, threadOffset);
 
     for (uint32_t s = 0; s < kStride; ++s) {
         const uint64_t localIdx = threadOffset + s;
@@ -1122,8 +1117,9 @@ containsSequenceKmersKernel(
         const uint64_t kmerIndex = blockStartKmer + localIdx;
 
         if (s > 0) {
-            packedKmer =
-                advancePackedKmer<Config::k>(packedKmer, sequenceTile[localIdx + Config::k - 1]);
+            packedKmer = advancePackedKmer<Config, Config::k>(
+                packedKmer, sequenceTile[localIdx + Config::k - 1]
+            );
         }
 
         if (!(kmerValidMask & (1u << s))) {
@@ -1138,7 +1134,7 @@ containsSequenceKmersKernel(
         const uint32_t peers = __match_any_sync(0xFFFFFFFFu, shardIdx);
         const int leader = __ffs(static_cast<int>(peers)) - 1;
 
-        typename Config::WordType w[4];
+        uint64_t w[4];
         if (static_cast<int>(threadIdx.x & 31u) == leader) {
             loadShardWords4<Config>(shards.data(), shardIdx, w);
         }
@@ -1148,7 +1144,7 @@ containsSequenceKmersKernel(
         w[3] = __shfl_sync(peers, w[3], leader);
 
         const bool present = sectorizedContainsPackedKmer<Config>(packedKmer, w);
-        output[kmerIndex] = static_cast<uint8_t>(present);
+        output[kmerIndex] = present;
     }
 }
 
@@ -1172,7 +1168,7 @@ __global__ void insertSequenceKmersKernel(
     constexpr uint32_t warpSize = 32;
     constexpr uint32_t warpsPerBlock = Config::cudaBlockSize / warpSize;
 
-    using WarpReduceWord = cub::WarpReduce<typename Config::WordType>;
+    using WarpReduceWord = cub::WarpReduce<uint64_t>;
 
     __shared__ uint8_t sequenceTile[sequenceTileBases];
     __shared__ typename WarpReduceWord::TempStorage reduceStorage[warpsPerBlock][4];
@@ -1183,8 +1179,7 @@ __global__ void insertSequenceKmersKernel(
         return;
     }
 
-    const uint64_t blockKmers =
-        min(static_cast<uint64_t>(Config::cudaBlockSize), numKmers - blockStartKmer);
+    const uint64_t blockKmers = min(Config::cudaBlockSize, numKmers - blockStartKmer);
     const auto localKmerIndex = static_cast<uint64_t>(threadIdx.x);
     const bool inRange = localKmerIndex < blockKmers;
 
@@ -1199,7 +1194,7 @@ __global__ void insertSequenceKmersKernel(
     if (active && !blockAllValid) {
         _Pragma("unroll")
         for (uint64_t i = 0; i < Config::k; ++i) {
-            if (sequenceTile[localKmerIndex + i] > 3) {
+            if (sequenceTile[localKmerIndex + i] >= Config::alphabetSize) {
                 active = false;
                 break;
             }
@@ -1209,13 +1204,14 @@ __global__ void insertSequenceKmersKernel(
     // Inactive threads keep zero masks and a per-lane sentinel shard index so
     // contiguous run detection naturally splits around them.
     uint64_t minimizerHash = 0;
-    typename Config::WordType wordMask0 = 0;
-    typename Config::WordType wordMask1 = 0;
-    typename Config::WordType wordMask2 = 0;
-    typename Config::WordType wordMask3 = 0;
+    uint64_t wordMask0 = 0;
+    uint64_t wordMask1 = 0;
+    uint64_t wordMask2 = 0;
+    uint64_t wordMask3 = 0;
 
     if (active) {
-        const uint64_t packedKmer = packKmerFromTile<Config::k>(sequenceTile, localKmerIndex);
+        const uint64_t packedKmer =
+            packKmerFromTile<Config, Config::k>(sequenceTile, localKmerIndex);
         minimizerHash = packedKmerMinimizerHash<Config>(packedKmer);
 
         uint64_t h_s = packedKmerSmerHash<Config>(packedKmer, 0);
@@ -1240,7 +1236,7 @@ __global__ void insertSequenceKmersKernel(
     const uint32_t warpIdx = threadIdx.x / warpSize;
     const uint32_t prevShardIdx = __shfl_up_sync(0xffffffff, shardIdx, 1);
     const bool runHead = (lane == 0) || (shardIdx != prevShardIdx);
-    const BitwiseOr<typename Config::WordType> bitwiseOr{};
+    const BitwiseOr<uint64_t> bitwiseOr{};
 
     wordMask0 = WarpReduceWord(reduceStorage[warpIdx][0])
                     .HeadSegmentedReduce(wordMask0, runHead, bitwiseOr);

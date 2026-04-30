@@ -17,6 +17,11 @@
 #include <bloom/BloomFilter.cuh>
 
 using TestConfig = bloom::Config<5, 4, 3, 4>;
+using ProteinTestConfig = bloom::Config<5, 4, 3, 4, 256, bloom::ProteinAlphabet>;
+
+static_assert(TestConfig::symbolBits == 2);
+static_assert(ProteinTestConfig::symbolBits == 5);
+static_assert(bloom::Config<12, 8, 5, 4, 256, bloom::ProteinAlphabet>::k == 12);
 
 class BloomFilterTest : public ::testing::Test {
    protected:
