@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "test_support.hpp"
+#include "test_support.cuh"
 
 TEST_F(BloomFilterTest, InsertFastxFileParsesWrappedFastaRecords) {
     bloom::Filter<TestConfig> filter(1 << 12);

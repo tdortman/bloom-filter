@@ -4,7 +4,7 @@
 
 #include <bloom/device_span.cuh>
 
-#include "test_support.hpp"
+#include "test_support.cuh"
 
 TEST_F(BloomFilterTest, InsertAndQuerySameSequenceHasNoFalseNegatives) {
     bloom::Filter<TestConfig> filter(1 << 12);
@@ -181,5 +181,17 @@ TEST_F(BloomFilterTest, ProteinAlphabetInvalidSymbolsResetForwardWindows) {
 
     EXPECT_EQ(inserted, hits.size());
     const std::vector<uint8_t> expected = {0, 0, 0, 0, 0, 1, 1, 1, 1};
+    EXPECT_EQ(hits, expected);
+}
+
+TEST_F(BloomFilterTest, CustomAlphabetUsesExplicitInvalidSentinel) {
+    bloom::Filter<CustomAlphabetTestConfig> filter(1 << 12);
+
+    const std::string sequence = "xyz!xyz";
+    const auto inserted = filter.insertSequence(sequence);
+    const auto hits = filter.containsSequence(sequence);
+
+    EXPECT_EQ(inserted, hits.size());
+    const std::vector<uint8_t> expected = {1, 0, 0, 0, 1};
     EXPECT_EQ(hits, expected);
 }

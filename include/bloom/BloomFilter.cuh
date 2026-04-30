@@ -83,8 +83,8 @@ struct Config {
     static_assert(m * symbolBits <= 64, "m-mer must fit in one packed uint64_t");
     static_assert(s * symbolBits <= 64, "s-mer must fit in one packed uint64_t");
     static_assert(
-        Alphabet::encode(Alphabet::separator) >= alphabetSize,
-        "Alphabet separator must encode as an invalid symbol"
+        Alphabet::encode(Alphabet::separator) == Alphabet::invalidSymbol,
+        "Alphabet separator must encode as the invalid symbol"
     );
     static_assert(hashCount > 0, "At least one Bloom hash is required");
     static_assert(hashCount <= 16, "This implementation provides 16 multiplicative salts");
@@ -682,14 +682,16 @@ class Filter {
 
         uint64_t invalidSymbols = 0;
         for (uint64_t i = 0; i < Config::k; ++i) {
-            invalidSymbols += Config::Alphabet::encode(sequence[i]) >= Config::alphabetSize;
+            invalidSymbols +=
+                Config::Alphabet::encode(sequence[i]) == Config::Alphabet::invalidSymbol;
         }
 
         uint64_t validKmers = invalidSymbols == 0 ? 1 : 0;
         for (uint64_t start = 1; start < recordKmerCount(sequence.size()); ++start) {
-            invalidSymbols -= Config::Alphabet::encode(sequence[start - 1]) >= Config::alphabetSize;
-            invalidSymbols +=
-                Config::Alphabet::encode(sequence[start + Config::k - 1]) >= Config::alphabetSize;
+            invalidSymbols -=
+                Config::Alphabet::encode(sequence[start - 1]) == Config::Alphabet::invalidSymbol;
+            invalidSymbols += Config::Alphabet::encode(sequence[start + Config::k - 1]) ==
+                              Config::Alphabet::invalidSymbol;
             validKmers += invalidSymbols == 0;
         }
         return validKmers;
@@ -1027,7 +1029,7 @@ __device__ __forceinline__ bool prepareSequenceHashTiles(
     for (uint64_t idx = threadIdx.x; idx < tileBases; idx += Config::cudaBlockSize) {
         const uint8_t encodedBase = Config::Alphabet::encode(sequence[blockStartKmer + idx]);
         sequenceTile[idx] = encodedBase;
-        localInvalidBase |= (encodedBase >= Config::alphabetSize);
+        localInvalidBase |= (encodedBase == Config::Alphabet::invalidSymbol);
     }
     return __syncthreads_count(localInvalidBase) == 0;
 }
@@ -1093,7 +1095,7 @@ __global__ void __launch_bounds__(Config::cudaBlockSize, 6) containsSequenceKmer
             bool valid = true;
             _Pragma("unroll")
             for (uint64_t i = 0; i < Config::k; ++i) {
-                if (sequenceTile[localIdx + i] >= Config::alphabetSize) {
+                if (sequenceTile[localIdx + i] == Config::Alphabet::invalidSymbol) {
                     valid = false;
                     break;
                 }
@@ -1194,7 +1196,7 @@ __global__ void insertSequenceKmersKernel(
     if (active && !blockAllValid) {
         _Pragma("unroll")
         for (uint64_t i = 0; i < Config::k; ++i) {
-            if (sequenceTile[localKmerIndex + i] >= Config::alphabetSize) {
+            if (sequenceTile[localKmerIndex + i] == Config::Alphabet::invalidSymbol) {
                 active = false;
                 break;
             }
