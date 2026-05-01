@@ -1,6 +1,7 @@
 #pragma once
 
 #include <benchmark/benchmark.h>
+#include <cuda/__cmath/ceil_div.h>
 #include <cuda_runtime.h>
 #include <thrust/count.h>
 #include <thrust/device_ptr.h>
@@ -177,7 +178,7 @@ inline void gpuEncodePackedKmers(
         return;
     }
     constexpr uint64_t blockSize = 256;
-    const uint64_t gridSize = bloom::detail::divUp(numKmers, blockSize);
+    const uint64_t gridSize = cuda::ceil_div(numKmers, blockSize);
     encodePackedKmersKernel<K, Alphabet><<<gridSize, blockSize, 0, stream>>>(
         d_sequence, numKmers, d_output
     );

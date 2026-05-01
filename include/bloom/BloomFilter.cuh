@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda/__cmath/ceil_div.h>
 #include <cuda_runtime.h>
 
 #include <cuda/algorithm>
@@ -433,7 +434,7 @@ class Filter {
     explicit Filter(uint64_t requestedFilterBits)
         : numShards_(
               cuda::std::bit_ceil(
-                  std::max<uint64_t>(1, detail::divUp(requestedFilterBits, Config::filterBlockBits))
+                  std::max<uint64_t>(1, cuda::ceil_div(requestedFilterBits, Config::filterBlockBits))
               )
           ),
           filterBits_(numShards_ * Config::filterBlockBits),
@@ -820,7 +821,7 @@ class Filter {
             return;
         }
         const uint64_t numKmers = d_sequence.size() - Config::k + 1;
-        const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize);
+        const uint64_t gridSize = cuda::ceil_div(numKmers, Config::cudaBlockSize);
 
         detail::insertSequenceKmersKernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
@@ -844,7 +845,7 @@ class Filter {
         const uint64_t numKmers = d_sequence.size() - Config::k + 1;
         cuda::fill_bytes(stream, d_output, 0);
         constexpr uint64_t kStride = 4;
-        const uint64_t gridSize = detail::divUp(numKmers, Config::cudaBlockSize * kStride);
+        const uint64_t gridSize = cuda::ceil_div(numKmers, Config::cudaBlockSize * kStride);
 
         detail::containsSequenceKmersKernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(

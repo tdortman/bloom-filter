@@ -1,4 +1,5 @@
 #include <benchmark/benchmark.h>
+#include <cuda/__cmath/ceil_div.h>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 
@@ -167,7 +168,7 @@ class CucoBloomFprFastxFixture : public bm::Fixture {
         filterBits = static_cast<uint64_t>(state.range(0));
         constexpr auto bitsPerBlock =
             CucoBloom::words_per_block * sizeof(typename CucoBloom::word_type) * 8;
-        uint64_t blocks = bloom::detail::divUp(filterBits, bitsPerBlock);
+        uint64_t blocks = cuda::ceil_div(filterBits, bitsPerBlock);
         if (blocks == 0) {
             blocks = 1;
         }

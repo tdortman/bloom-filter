@@ -1,4 +1,5 @@
 #include <benchmark/benchmark.h>
+#include <cuda/__cmath/ceil_div.h>
 #include <cuda_runtime.h>
 #include <thrust/count.h>
 #include <thrust/device_vector.h>
@@ -57,7 +58,7 @@ SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG(DEFINE_CUCO_REFERENCE_CONFIG)
 
 uint64_t cucoNumBlocks(uint64_t numItems) {
     constexpr auto bitsPerWord = sizeof(typename CucoBloom::word_type) * 8;
-    return bloom::detail::divUp(numItems * kBitsPerItem, CucoBloom::words_per_block * bitsPerWord);
+    return cuda::ceil_div(numItems * kBitsPerItem, CucoBloom::words_per_block * bitsPerWord);
 }
 
 class CucoBloomFixture : public bm::Fixture {

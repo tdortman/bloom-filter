@@ -36,14 +36,6 @@ class CudaError : public std::runtime_error {
 
 namespace bloom::detail {
 
-/**
- * @brief Integer ceiling division.
- */
-template <cuda::std::integral Integer>
-constexpr auto divUp(Integer x, Integer y) {
-    return (x + y - 1) / y;
-}
-
 #if __CUDA_ARCH__ >= 1000
 
 /**
