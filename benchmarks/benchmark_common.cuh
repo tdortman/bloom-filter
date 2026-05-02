@@ -113,23 +113,35 @@ inline void setBenchmarkCounters(
     state.counters["num_kmers"] = benchmark::Counter(static_cast<double>(numKmers));
 }
 
+namespace detail {
+
+__device__ __forceinline__ char randomDnaBase(uint64_t idx, uint32_t seed) {
+    thrust::default_random_engine rng(seed);
+    thrust::uniform_int_distribution<uint32_t> dist(0, 3);
+    rng.discard(idx);
+    constexpr char bases[] = {'A', 'C', 'G', 'T'};
+    return bases[dist(rng)];
+}
+
+__device__ __forceinline__ char randomProteinSymbol(uint64_t idx, uint32_t seed) {
+    thrust::default_random_engine rng(seed);
+    thrust::uniform_int_distribution<uint32_t> dist(0, 19);
+    rng.discard(idx);
+    constexpr char symbols[] = {'A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
+                                'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'};
+    return symbols[dist(rng)];
+}
+
+}  // namespace detail
+
 inline void
 gpuGenerateDna(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t seed = 42) {
     d_seq.resize(length);
-
     thrust::transform(
         thrust::counting_iterator<uint64_t>(0),
         thrust::counting_iterator<uint64_t>(length),
         d_seq.begin(),
-        [seed] __device__(uint64_t idx) {
-            thrust::default_random_engine rng(seed);
-            thrust::uniform_int_distribution<uint32_t> dist(0, 3);
-            rng.discard(idx);
-
-            static constexpr char bases[] = {'A', 'C', 'G', 'T'};
-
-            return bases[dist(rng)];
-        }
+        [seed] __device__(uint64_t idx) { return detail::randomDnaBase(idx, seed); }
     );
 }
 
@@ -140,16 +152,7 @@ gpuGenerateProtein(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t
         thrust::counting_iterator<uint64_t>(0),
         thrust::counting_iterator<uint64_t>(length),
         d_seq.begin(),
-        [seed] __device__(uint64_t idx) {
-            thrust::default_random_engine rng(seed);
-            thrust::uniform_int_distribution<uint32_t> dist(0, 19);
-            rng.discard(idx);
-
-            static constexpr char symbols[] = {'A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
-                                               'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'};
-
-            return symbols[dist(rng)];
-        }
+        [seed] __device__(uint64_t idx) { return detail::randomProteinSymbol(idx, seed); }
     );
 }
 
