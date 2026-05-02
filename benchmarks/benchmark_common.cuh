@@ -115,7 +115,6 @@ inline void setBenchmarkCounters(
 
 inline void
 gpuGenerateDna(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t seed = 42) {
-    static constexpr char bases[] = {'A', 'C', 'G', 'T'};
     d_seq.resize(length);
 
     thrust::transform(
@@ -126,6 +125,9 @@ gpuGenerateDna(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t see
             thrust::default_random_engine rng(seed);
             thrust::uniform_int_distribution<uint32_t> dist(0, 3);
             rng.discard(idx);
+
+            static constexpr char bases[] = {'A', 'C', 'G', 'T'};
+
             return bases[dist(rng)];
         }
     );
@@ -133,8 +135,6 @@ gpuGenerateDna(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t see
 
 inline void
 gpuGenerateProtein(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t seed = 42) {
-    static constexpr char symbols[] = {'A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
-                                       'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'};
     d_seq.resize(length);
     thrust::transform(
         thrust::counting_iterator<uint64_t>(0),
@@ -144,6 +144,9 @@ gpuGenerateProtein(thrust::device_vector<char>& d_seq, uint64_t length, uint32_t
             thrust::default_random_engine rng(seed);
             thrust::uniform_int_distribution<uint32_t> dist(0, 19);
             rng.discard(idx);
+
+            static constexpr char symbols[] = {'A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L',
+                                               'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y'};
 
             return symbols[dist(rng)];
         }
