@@ -18,3 +18,11 @@ option(
     value: 'disabled',
     description: 'Build param_sweep for the library',
 )
+
+option(
+    'param_sweep_alphabet',
+    type: 'combo',
+    choices: ['dna', 'protein'],
+    value: 'dna',
+    description: 'Alphabet for param_sweep benchmarks (dna or protein)',
+)
