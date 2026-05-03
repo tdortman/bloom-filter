@@ -209,7 +209,7 @@ inline void gpuEncodePackedKmers(
         <<<gridSize, blockSize, 0, stream>>>(d_sequence, numKmers, d_output);
 }
 
-template <uint64_t K>
+template <uint64_t K, typename Alphabet = bloom::DnaAlphabet>
 struct BenchmarkData {
     uint64_t sequenceLength{};
     uint64_t numKmers{};
@@ -224,7 +224,11 @@ struct BenchmarkData {
     bool fprDataReady = false;
 
     void generateThroughputData() {
-        gpuGenerateDna(d_throughputSequence, sequenceLength, 42);
+        if constexpr (std::is_same_v<Alphabet, bloom::ProteinAlphabet>) {
+            gpuGenerateProtein(d_throughputSequence, sequenceLength, 42);
+        } else {
+            gpuGenerateDna(d_throughputSequence, sequenceLength, 42);
+        }
         numKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
         d_throughputPackedKmers.resize(numKmers);
     }
@@ -238,18 +242,23 @@ struct BenchmarkData {
 
    private:
     void generateFprData() {
-        gpuGenerateDna(d_fprInsertSequence, sequenceLength, 7);
+        if constexpr (std::is_same_v<Alphabet, bloom::ProteinAlphabet>) {
+            gpuGenerateProtein(d_fprInsertSequence, sequenceLength, 7);
+            gpuGenerateProtein(d_zeroOverlapSequence, sequenceLength, 1337);
+        } else {
+            gpuGenerateDna(d_fprInsertSequence, sequenceLength, 7);
+            gpuGenerateDna(d_zeroOverlapSequence, sequenceLength, 1337);
+        }
         const uint64_t fprNumKmers = sequenceLength >= K ? sequenceLength - K + 1 : 0;
         d_fprInsertPackedKmers.resize(fprNumKmers);
-        gpuEncodePackedKmers<K>(
+        gpuEncodePackedKmers<K, Alphabet>(
             thrust::raw_pointer_cast(d_fprInsertSequence.data()),
             sequenceLength,
             thrust::raw_pointer_cast(d_fprInsertPackedKmers.data())
         );
 
-        gpuGenerateDna(d_zeroOverlapSequence, sequenceLength, 1337);
         d_zeroOverlapPackedKmers.resize(fprNumKmers);
-        gpuEncodePackedKmers<K>(
+        gpuEncodePackedKmers<K, Alphabet>(
             thrust::raw_pointer_cast(d_zeroOverlapSequence.data()),
             sequenceLength,
             thrust::raw_pointer_cast(d_zeroOverlapPackedKmers.data())
@@ -261,9 +270,9 @@ struct BenchmarkData {
     }
 };
 
-template <uint64_t K>
-BenchmarkData<K>& getBenchmarkData(uint64_t length) {
-    static std::unordered_map<uint64_t, BenchmarkData<K>> cache;
+template <uint64_t K, typename Alphabet = bloom::DnaAlphabet>
+BenchmarkData<K, Alphabet>& getBenchmarkData(uint64_t length) {
+    static std::unordered_map<uint64_t, BenchmarkData<K, Alphabet>> cache;
 
     auto it = cache.find(length);
     if (it != cache.end()) {
@@ -272,7 +281,7 @@ BenchmarkData<K>& getBenchmarkData(uint64_t length) {
 
     cache.clear();
 
-    BenchmarkData<K> data;
+    BenchmarkData<K, Alphabet> data;
     data.sequenceLength = length;
     data.generateThroughputData();
     BLOOM_CUDA_CALL(cudaDeviceSynchronize());
@@ -287,7 +296,7 @@ class SuperBloomFixtureBase : public benchmark::Fixture {
 
     void setupCommon(const benchmark::State& state) {
         sequenceLength = static_cast<uint64_t>(state.range(0));
-        benchData = &getBenchmarkData<Config::k>(sequenceLength);
+        benchData = &getBenchmarkData<Config::k, typename Config::Alphabet>(sequenceLength);
 
         numKmers = benchData->numKmers;
         numSmers = sequenceLength - Config::s + 1;
@@ -315,7 +324,7 @@ class SuperBloomFixtureBase : public benchmark::Fixture {
     uint64_t numKmers{};
     uint64_t numSmers{};
     uint64_t filterMemory{};
-    BenchmarkData<Config::k>* benchData{};
+    BenchmarkData<Config::k, typename Config::Alphabet>* benchData{};
     thrust::device_vector<uint8_t> d_output;
     std::unique_ptr<bloom::Filter<Config>> filter;
     GPUTimer timer;
