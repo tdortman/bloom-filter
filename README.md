@@ -19,7 +19,7 @@ It exploits the streaming nature of sequence-derived k-mers by using **minimiser
 
 ## Performance
 
-Benchmarks (`Config<31, 28, 16, 4>`) comparing Super Bloom against [cuco](https://github.com/NVIDIA/cuCollections)'s `bloom_filter` on an NVIDIA RTX PRO 6000 Blackwell GPU with random DNA sequence inputs. Throughput is reported in billions of k-mers per second (Gk-mers/s). Timings include GPU-side sequence encoding for cuco, so both methods consume the same input sequence.
+Benchmarks (`Config<31, 28, 16, 4>`) comparing Super Bloom against [NVIDIA's](https://github.com/NVIDIA/cuCollections) `bloom_filter` on an NVIDIA RTX PRO 6000 Blackwell GPU with random DNA sequence inputs. Throughput is reported in billions of k-mers per second (Gk-mers/s). Timings include GPU-side sequence encoding for cuco, so both methods consume the same input sequence.
 
 | Dataset Size | Operation | Super Bloom    | cuco Bloom     | Speed-up |
 | ------------ | --------- | -------------- | -------------- | -------- |
