@@ -19,18 +19,27 @@ FILTER_STYLES = {
     "superbloom": {"color": "#2E86AB", "marker": "o"},
     "cucobloom": {"color": "#A23B72", "marker": "s"},
     "cuckoogpu": {"color": "#F18F01", "marker": "^"},
+    "proteinsuperbloom": {"color": "#4FA3C7", "marker": "o"},
+    "proteincucobloom": {"color": "#C15A8E", "marker": "s"},
+    "proteincuckoogpu": {"color": "#F5A623", "marker": "^"},
 }
 
 FILTER_COLORS = {
     "superbloom": FILTER_STYLES["superbloom"]["color"],
     "cucobloom": FILTER_STYLES["cucobloom"]["color"],
     "cuckoogpu": FILTER_STYLES["cuckoogpu"]["color"],
+    "proteinsuperbloom": FILTER_STYLES["proteinsuperbloom"]["color"],
+    "proteincucobloom": FILTER_STYLES["proteincucobloom"]["color"],
+    "proteincuckoogpu": FILTER_STYLES["proteincuckoogpu"]["color"],
 }
 
 FILTER_DISPLAY_NAMES = {
     "superbloom": "GPU SuperBloom",
     "cucobloom": "GPU Blocked Bloom",
     "cuckoogpu": "Cuckoo-GPU",
+    "proteinsuperbloom": "GPU SuperBloom (Protein)",
+    "proteincucobloom": "GPU Blocked Bloom (Protein)",
+    "proteincuckoogpu": "Cuckoo-GPU (Protein)",
 }
 
 OPERATION_COLORS = {
