@@ -50,7 +50,7 @@ static uint64_t g_filterBits = 0;
 
 static std::vector<char> readFastxConcatenated(std::string_view path) {
     auto input = bloom::detail::openFastxFile(path);
-    bloom::detail::FastxReader reader(input, path);
+    bloom::detail::FastxReader reader(*input, path);
     bloom::detail::FastxRecord record;
 
     std::vector<char> sequence;

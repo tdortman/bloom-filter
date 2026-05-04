@@ -20,8 +20,11 @@ cuda_args = [
     '-gencode=arch=compute_80,code=sm_80',
 ]
 
+zlib_dep = subproject('zlib').get_variable('zlib_dep')
+
 bloom_dep = declare_dependency(
     include_directories: include_directories('include'),
+    dependencies: [zlib_dep],
 )
 
 cli11_dep = subproject('cli11').get_variable('CLI11_dep')

@@ -520,7 +520,7 @@ class Filter {
     [[nodiscard]] FastxInsertReport
     insertFastxFile(std::string_view path, cuda::stream_ref stream = cudaStream_t{}) {
         auto input = detail::openFastxFile(path);
-        return insertFastxStream(input, path, stream);
+        return insertFastxStream(*input, path, stream);
     }
 
     /**
@@ -605,7 +605,7 @@ class Filter {
     [[nodiscard]] FastxQueryReport
     queryFastxFile(std::string_view path, cuda::stream_ref stream = cudaStream_t{}) const {
         auto input = detail::openFastxFile(path);
-        return queryFastxStream(input, path, stream);
+        return queryFastxStream(*input, path, stream);
     }
 
     /**

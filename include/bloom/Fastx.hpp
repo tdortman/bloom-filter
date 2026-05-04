@@ -3,10 +3,13 @@
 #include <cstdint>
 #include <fstream>
 #include <istream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#include <bloom/gzstreambuf.hpp>
 
 namespace bloom {
 
@@ -197,9 +200,12 @@ class FastxReader {
  * @return Open input file stream.
  * @throws std::runtime_error if the file cannot be opened.
  */
-inline std::ifstream openFastxFile(std::string_view path) {
-    std::ifstream input{std::string(path)};
-    if (!input.is_open()) {
+inline std::unique_ptr<std::istream> openFastxFile(std::string_view path) {
+    if (isGzipFile(path)) {
+        return std::make_unique<GzIstream>(path);
+    }
+    auto input = std::make_unique<std::ifstream>(std::string(path));
+    if (!input->is_open()) {
         throw std::runtime_error("Failed to open FASTA/FASTQ file: " + std::string(path));
     }
     return input;
