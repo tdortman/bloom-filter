@@ -1,0 +1,169 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 2497492..a58b47a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -3,6 +3,9 @@ name = "superbloom"
+ version = "0.1.0"
+ edition = "2024"
+ 
++[lib]
++crate-type = ["staticlib", "lib"]
++
+ [dependencies]
+ ahash = "0.8.12"
+ async-stream = "0.3.6"
+diff --git a/src/ffi.rs b/src/ffi.rs
+new file mode 100644
+index 0000000..41f6323
+--- /dev/null
++++ b/src/ffi.rs
+@@ -0,0 +1,137 @@
++#![allow(clippy::missing_safety_doc)]
++
++use std::ffi::c_void;
++
++use crate::{MinimizerMode, SuperBloom, SuperBloomConfig};
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_create(
++    k: u16,
++    m: u16,
++    s: u16,
++    n_hashes: usize,
++    bit_vector_size_exponent: u8,
++    block_size_exponent: u8,
++) -> *mut c_void {
++    let result = std::panic::catch_unwind(|| {
++        let config = SuperBloomConfig {
++            k,
++            m,
++            s,
++            n_hashes,
++            bit_vector_size_exponent,
++            block_size_exponent,
++            minimizer_mode: MinimizerMode::Simd,
++        };
++
++        SuperBloom::new(config)
++    });
++
++    match result {
++        Ok(Ok(bloom)) => Box::into_raw(Box::new(bloom)).cast::<c_void>(),
++        _ => std::ptr::null_mut(),
++    }
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_insert_sequence(
++    handle: *mut c_void,
++    seq: *const u8,
++    len: usize,
++) -> i64 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() || seq.is_null() {
++            return -1;
++        }
++
++        let bloom = unsafe { &mut *handle.cast::<SuperBloom>() };
++        let sequence = unsafe { std::slice::from_raw_parts(seq, len) };
++
++        match bloom.add_sequence(sequence) {
++            Ok(added) => added.cast_signed(),
++            Err(_) => -1,
++        }
++    });
++
++    result.unwrap_or(-1)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_query_sequence(
++    handle: *const c_void,
++    seq: *const u8,
++    len: usize,
++) -> i64 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() || seq.is_null() {
++            return -1;
++        }
++
++        let bloom = unsafe { &*handle.cast::<SuperBloom>() };
++        let sequence = unsafe { std::slice::from_raw_parts(seq, len) };
++
++        match bloom.query_sequence(sequence) {
++            Ok(results) => results.iter().map(|&b| b as i64).sum(),
++            Err(_) => -1,
++        }
++    });
++
++    result.unwrap_or(-1)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_freeze(handle: *const c_void) -> i32 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() {
++            return -1;
++        }
++
++        let bloom = unsafe { &*handle.cast::<SuperBloom>() };
++        bloom.freeze();
++        0
++    });
++
++    result.unwrap_or(-1)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_set_threads(handle: *mut c_void, n: usize) -> i32 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() {
++            return -1;
++        }
++
++        let bloom = unsafe { &mut *handle.cast::<SuperBloom>() };
++        match bloom.set_threads(n) {
++            Ok(()) => 0,
++            Err(_) => -1,
++        }
++    });
++
++    result.unwrap_or(-1)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_filter_bits(handle: *const c_void) -> u64 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() {
++            return 0;
++        }
++
++        let bloom = unsafe { &*handle.cast::<SuperBloom>() };
++        1u64 << bloom.config().bit_vector_size_exponent
++    });
++
++    result.unwrap_or(0)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_destroy(handle: *mut c_void) {
++    if handle.is_null() {
++        return;
++    }
++
++    let _ = std::panic::catch_unwind(|| unsafe {
++        drop(Box::from_raw(handle.cast::<SuperBloom>()));
++    });
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index e361906..0be3da3 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -27,6 +27,7 @@
+ 
+ mod bloom;
+ pub mod decyclers;
++pub mod ffi;
+ pub mod minimizers;
+ pub mod super_bitvec;
+ pub mod utils;
