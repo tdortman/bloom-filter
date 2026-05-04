@@ -20,15 +20,6 @@ import typer
 app = typer.Typer(help="Plot FPR benchmark results")
 
 
-LEGACY_FPR_FILTERS = {
-    "GCF_FPR": "gcf",
-    "CCF_FPR": "ccf",
-    "BBF_FPR": "bbf",
-    "TCF_FPR": "tcf",
-    "GQF_FPR": "gqf",
-    "PCF_FPR": "pcf",
-}
-
 SUPERBLOOM_FIXTURE_PATTERN = re.compile(
     r"^SuperBloomFixture(?P<s>\d+)?$", re.IGNORECASE
 )
@@ -36,19 +27,14 @@ SUPERBLOOM_CONFIG_FIXTURE_PATTERN = re.compile(
     r"^SuperBloom_K(?P<k>\d+)_S(?P<s>\d+)_M(?P<m>\d+)_H(?P<h>\d+)_Fixture$",
     re.IGNORECASE,
 )
+SUPERBLOOM_CPU_CONFIG_FIXTURE_PATTERN = re.compile(
+    r"^SuperBloomCpu_K(?P<k>\d+)_S(?P<s>\d+)_M(?P<m>\d+)_H(?P<h>\d+)_Fixture$",
+    re.IGNORECASE,
+)
 CUCO_FIXTURE_PATTERN = re.compile(r"^CucoBloomFixture$", re.IGNORECASE)
 
 SUPERBLOOM_VARIANT_MARKERS = ["o", "s", "^", "D", "P", "X", "v", "<", ">"]
 SUPERBLOOM_VARIANT_LINESTYLES = ["-", "--", "-.", ":"]
-
-
-def extract_legacy_filter_type(name: str) -> Optional[str]:
-    """Extract legacy filter type from benchmark name."""
-    for token, filter_type in LEGACY_FPR_FILTERS.items():
-        if token in name:
-            return filter_type
-
-    return None
 
 
 def parse_superbloom_variant(fixture_name: str, row: pd.Series) -> Optional[int]:
@@ -72,6 +58,10 @@ def parse_superbloom_variant(fixture_name: str, row: pd.Series) -> Optional[int]
     if config_match is not None:
         return int(config_match.group("s"))
 
+    cpu_match = SUPERBLOOM_CPU_CONFIG_FIXTURE_PATTERN.match(fixture_name)
+    if cpu_match is not None:
+        return int(cpu_match.group("s"))
+
     return None
 
 
@@ -84,44 +74,35 @@ def extract_filter_series(name: str, row: pd.Series) -> Optional[tuple[str, str,
         fixture_name = parts[0]
         operation = parts[1]
         superbloom_variant = parse_superbloom_variant(fixture_name, row)
-        is_superbloom_fixture = (
-            superbloom_variant is not None
-            or fixture_name.lower() == "superbloomfixture"
+        is_cpu = SUPERBLOOM_CPU_CONFIG_FIXTURE_PATTERN.match(fixture_name) is not None
+        is_gpu = (
+            SUPERBLOOM_CONFIG_FIXTURE_PATTERN.match(fixture_name) is not None
+            or SUPERBLOOM_FIXTURE_PATTERN.match(fixture_name) is not None
         )
-        is_cuco_fixture = CUCO_FIXTURE_PATTERN.match(fixture_name) is not None
+        is_cuco = CUCO_FIXTURE_PATTERN.match(fixture_name) is not None
 
-        if is_superbloom_fixture or is_cuco_fixture:
+        if is_gpu or is_cpu or is_cuco:
             if operation.upper() != "FPR":
                 return None
 
-            if superbloom_variant is not None:
+            if is_cpu and superbloom_variant is not None:
+                series_key = f"superbloom_cpu_s{superbloom_variant}"
+                display_name = f"{pu.get_filter_display_name('superbloom_cpu')} (s={superbloom_variant})"
+                return series_key, "superbloom_cpu", display_name
+
+            if is_gpu and superbloom_variant is not None:
                 series_key = f"superbloom_s{superbloom_variant}"
                 display_name = f"{pu.get_filter_display_name('superbloom')} (s={superbloom_variant})"
                 return series_key, "superbloom", display_name
 
-            if fixture_name.lower() == "superbloomfixture":
-                return (
-                    "superbloom",
-                    "superbloom",
-                    pu.get_filter_display_name("superbloom"),
-                )
-
-            if is_cuco_fixture:
+            if is_cuco:
                 return (
                     "cucobloom",
                     "cucobloom",
                     pu.get_filter_display_name("cucobloom"),
                 )
 
-    legacy_filter_type = extract_legacy_filter_type(stripped_name)
-    if legacy_filter_type is None:
-        return None
-
-    return (
-        legacy_filter_type,
-        legacy_filter_type,
-        pu.get_filter_display_name(legacy_filter_type),
-    )
+    return None
 
 
 def get_plot_style(filter_type: str, base_filter: str) -> dict[str, str]:
@@ -133,7 +114,7 @@ def get_plot_style(filter_type: str, base_filter: str) -> dict[str, str]:
         )
     )
 
-    if base_filter == "superbloom" and filter_type.startswith("superbloom_s"):
+    if base_filter in ("superbloom", "superbloom_cpu") and re.search(r"_s(\d+)$", filter_type):
         variant_match = re.search(r"_s(\d+)$", filter_type)
         if variant_match is not None:
             variant_index = int(variant_match.group(1))

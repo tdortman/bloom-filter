@@ -17,6 +17,7 @@ import typer
 
 FILTER_STYLES = {
     "superbloom": {"color": "#2E86AB", "marker": "o"},
+    "superbloom_cpu": {"color": "#C0392B", "marker": "D"},
     "cucobloom": {"color": "#A23B72", "marker": "s"},
     "cuckoogpu": {"color": "#F18F01", "marker": "^"},
     "proteinsuperbloom": {"color": "#4FA3C7", "marker": "o"},
@@ -26,6 +27,7 @@ FILTER_STYLES = {
 
 FILTER_COLORS = {
     "superbloom": FILTER_STYLES["superbloom"]["color"],
+    "superbloom_cpu": FILTER_STYLES["superbloom_cpu"]["color"],
     "cucobloom": FILTER_STYLES["cucobloom"]["color"],
     "cuckoogpu": FILTER_STYLES["cuckoogpu"]["color"],
     "proteinsuperbloom": FILTER_STYLES["proteinsuperbloom"]["color"],
@@ -35,6 +37,7 @@ FILTER_COLORS = {
 
 FILTER_DISPLAY_NAMES = {
     "superbloom": "GPU SuperBloom",
+    "superbloom_cpu": "CPU SuperBloom",
     "cucobloom": "GPU Blocked Bloom",
     "cuckoogpu": "Cuckoo-GPU",
     "proteinsuperbloom": "GPU SuperBloom (Protein)",

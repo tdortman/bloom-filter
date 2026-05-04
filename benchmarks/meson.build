@@ -6,6 +6,8 @@ cuckoogpu_dep = subproject('cuckoogpu').get_variable('cuckoogpu_dep')
 
 bench_deps = [benchmark_dep, bloom_dep]
 
+superbloom_cpu_dep = subproject('superbloom-cpu').get_variable('superbloom_cpu_dep')
+
 benchmarks = {
     'gpu-filter-comparison': {
         'src': 'gpu_filter_comparison.cu',
@@ -78,4 +80,10 @@ executable(
     install: false,
 )
 
-subproject('superbloom-cpu')
+executable(
+    'cpu-filter-comparison',
+    'cpu_filter_comparison.cu',
+    dependencies: bench_deps + [superbloom_cpu_dep],
+    cuda_args: cuda_args,
+    install: false,
+)
