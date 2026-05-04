@@ -15,7 +15,7 @@ benchmarks = {
     },
     'fpr-fastx-sweep': {
         'src': 'fpr_fastx_sweep.cu',
-        'deps': [cuco_dep],
+        'deps': [cuco_dep, superbloom_cpu_dep],
     },
 }
 

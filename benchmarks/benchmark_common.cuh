@@ -62,6 +62,21 @@ class GPUTimer {
     cudaEvent_t stop_{};
 };
 
+class CPUTimer {
+   public:
+    void start() {
+        start_ = std::chrono::high_resolution_clock::now();
+    }
+
+    [[nodiscard]] double elapsed() {
+        auto end = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double>(end - start_).count();
+    }
+
+   private:
+    std::chrono::time_point<std::chrono::high_resolution_clock> start_{};
+};
+
 // Concatenate all records in a FASTA/FASTQ file into a single sequence,
 // with 'N' as a separatorbetween records
 std::vector<char> readFastxConcatenated(std::string_view path) {
@@ -532,6 +547,7 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
     void* handle_{};
     bool initFailed_ = false;
     size_t threadCount_ = 0;
+    CPUTimer timer;
 };
 
 template <typename Fixture>
@@ -545,15 +561,13 @@ void runSuperBloomCpuInsert(Fixture& fixture, benchmark::State& state) {
             return;
         }
 
-        auto start = std::chrono::high_resolution_clock::now();
+        fixture.timer.start();
         auto added = superbloom_insert_sequence(
             fixture.handle_,
             reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
             fixture.sequenceLength
         );
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double>(end - start).count();
-        state.SetIterationTime(elapsed);
+        state.SetIterationTime(fixture.timer.elapsed());
         benchmark::DoNotOptimize(added);
     }
     fixture.setCounters(state);
@@ -576,15 +590,13 @@ void runSuperBloomCpuQuery(Fixture& fixture, benchmark::State& state) {
     superbloom_freeze(fixture.handle_);
 
     for (auto _ : state) {
-        auto start = std::chrono::high_resolution_clock::now();
+        fixture.timer.start();
         auto positives = superbloom_query_sequence(
             fixture.handle_,
             reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
             fixture.sequenceLength
         );
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double>(end - start).count();
-        state.SetIterationTime(elapsed);
+        state.SetIterationTime(fixture.timer.elapsed());
         benchmark::DoNotOptimize(positives);
     }
     fixture.setCounters(state);
@@ -624,15 +636,13 @@ void runSuperBloomCpuFpr(Fixture& fixture, benchmark::State& state) {
 
     uint64_t falsePositives = 0;
     for (auto _ : state) {
-        auto start = std::chrono::high_resolution_clock::now();
+        fixture.timer.start();
         auto positives = superbloom_query_sequence(
             fixture.handle_,
             reinterpret_cast<const uint8_t*>(zeroHostSeq.data()),
             fixture.sequenceLength
         );
-        auto end = std::chrono::high_resolution_clock::now();
-        double elapsed = std::chrono::duration<double>(end - start).count();
-        state.SetIterationTime(elapsed);
+        state.SetIterationTime(fixture.timer.elapsed());
         falsePositives = static_cast<uint64_t>(positives);
         benchmark::DoNotOptimize(falsePositives);
     }
@@ -642,6 +652,7 @@ void runSuperBloomCpuFpr(Fixture& fixture, benchmark::State& state) {
 }
 
 }  // namespace benchmark_common
+
 
 #define BENCHMARK_SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Config
 #define BENCHMARK_SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) \
