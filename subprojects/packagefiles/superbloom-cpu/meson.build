@@ -41,6 +41,11 @@ superbloom_cpu_lib = custom_target(
     env: {'RUSTFLAGS': '-C target-cpu=native'},
 )
 
+cc = meson.get_compiler('c')
+lzma_dep = cc.find_library('lzma', required: true)
+bz2_dep = cc.find_library('bz2', required: true)
+
 superbloom_cpu_dep = declare_dependency(
     link_with: superbloom_cpu_lib,
+    dependencies: [lzma_dep, bz2_dep],
 )

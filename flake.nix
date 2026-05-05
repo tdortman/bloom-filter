@@ -50,6 +50,8 @@
             cudaPkgs.cudatoolkit
             cudaPkgs.cuda_cudart
             pkgs.stdenv.cc.cc.lib
+            pkgs.xz
+            pkgs.bzip2
           ];
 
           nativeBuildInputs =
