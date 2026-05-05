@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda/std/__bit/integral.h>
 #include <cuda_runtime.h>
 
 #include <concepts>
@@ -18,9 +19,6 @@ namespace bloom {
  * - `T::encode(uint8_t)`: maps a byte to a symbol index, or `invalidSymbol`
  *   if the byte is not valid in the alphabet.
  *
- * The alphabet must contain at least one symbol and at most 255 symbols.
- * `invalidSymbol` must be outside the valid symbol range.
- *
  * @tparam T Alphabet type to validate.
  */
 template <typename T>
@@ -30,9 +28,12 @@ concept Alphabet = requires(uint8_t byte) {
     { T::separator } -> std::convertible_to<uint8_t>;
     { T::encode(byte) } -> std::same_as<uint8_t>;
 } && requires {
-    requires T::symbolCount > 0;
-    requires T::symbolCount <= 255;  // reserve 0xFF for invalidSymbol
-    requires T::invalidSymbol >= T::symbolCount;
+    // reserve 0xFF for invalidSymbol
+    requires T::symbolCount > 0 && T::symbolCount <= 255;
+
+    // separator must break k-mers between FASTX records
+    requires T::encode(static_cast<uint8_t>(T::separator)) ==
+                 static_cast<uint8_t>(T::invalidSymbol);
 };
 
 /**

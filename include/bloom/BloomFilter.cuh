@@ -83,10 +83,6 @@ struct Config {
     static_assert(k * symbolBits <= 64, "k-mer must fit in one packed uint64_t");
     static_assert(m * symbolBits <= 64, "m-mer must fit in one packed uint64_t");
     static_assert(s * symbolBits <= 64, "s-mer must fit in one packed uint64_t");
-    static_assert(
-        Alphabet::encode(Alphabet::separator) == Alphabet::invalidSymbol,
-        "Alphabet separator must encode as the invalid symbol"
-    );
     static_assert(hashCount > 0, "At least one Bloom hash is required");
     static_assert(hashCount <= 16, "This implementation provides 16 multiplicative salts");
     static_assert(filterBlockBits >= wordBits, "Filter block must contain at least one word");
