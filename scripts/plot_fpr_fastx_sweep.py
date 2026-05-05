@@ -23,6 +23,9 @@ SUPERBLOOM_CONFIG_FIXTURE_PATTERN = re.compile(
     r"^SuperBloom_K(?P<k>\d+)_S(?P<s>\d+)_M(?P<m>\d+)_H(?P<h>\d+)_FprFastxFixture$",
     re.IGNORECASE,
 )
+SUPERBLOOM_CPU_FIXTURE_PATTERN = re.compile(
+    r"^SuperBloomCpuFprFastxFixture$", re.IGNORECASE
+)
 CUCO_FIXTURE_PATTERN = re.compile(r"^CucoBloomFprFastxFixture$", re.IGNORECASE)
 
 SUPERBLOOM_VARIANT_MARKERS = ["o", "s", "^", "D", "P", "X", "v", "<", ">", "h", "*", "p", "H"]
@@ -54,6 +57,15 @@ def extract_filter_series(name: str) -> Optional[tuple[str, str, str]]:
                 "cucobloom",
                 "cucobloom",
                 pu.get_filter_display_name("cucobloom"),
+            )
+
+        if SUPERBLOOM_CPU_FIXTURE_PATTERN.match(fixture_name) is not None:
+            if operation.upper() != "FPR":
+                return None
+            return (
+                "superbloom_cpu",
+                "superbloom_cpu",
+                f"{pu.get_filter_display_name('superbloom_cpu')} (s=27)",
             )
 
     return None
@@ -134,9 +146,11 @@ def main(
     def sort_key(filter_type: str) -> tuple:
         if filter_type == "cucobloom":
             return (0, "")
+        if filter_type == "superbloom_cpu":
+            return (1, "")
         match = re.search(r"_s(\d+)$", filter_type)
         s = int(match.group(1)) if match else 0
-        return (1, -s)
+        return (2, -s)
 
     sorted_filters = sorted(fp_data.keys(), key=sort_key)
 
