@@ -31,6 +31,12 @@ struct FastxData {
     thrust::device_vector<char> d_querySequence;
     uint64_t queryKmers = 0;
 
+    // Query split into records (for CPU parallelism)
+    std::vector<char> h_queryRecords;
+    std::vector<uint64_t> queryRecordOffsets;
+    std::vector<uint64_t> queryRecordLengths;
+    uint64_t queryRecordCount = 0;
+
     // Pre-encoded packed k-mers for Cuco
     thrust::device_vector<uint64_t> d_insertPackedKmers;
     thrust::device_vector<uint64_t> d_queryPackedKmers;
@@ -41,6 +47,7 @@ static std::string g_insertFastxPath;
 
 static constexpr uint64_t kQueryLength = 1'000'000'000ULL;
 static constexpr uint64_t kQuerySeed = 0xDEADBEEF;
+static uint64_t g_numQueryRecords = 70;
 
 using CucoBloom = cuco::bloom_filter<uint64_t>;
 
@@ -71,9 +78,59 @@ static void prepareFastxData() {
     ));
     g_fastxData->insertKmers = hostInsert.size() >= 31 ? hostInsert.size() - 31 + 1 : 0;
 
-    // Generate query sequence on device
-    benchmark_common::gpuGenerateDna(g_fastxData->d_querySequence, kQueryLength, kQuerySeed);
-    g_fastxData->queryKmers = kQueryLength >= 31 ? kQueryLength - 31 + 1 : 0;
+    // Generate full query sequence on device, then split into records
+    thrust::device_vector<char> d_fullQuery;
+    benchmark_common::gpuGenerateDna(d_fullQuery, kQueryLength, kQuerySeed);
+
+    std::vector<char> hostFullQuery(kQueryLength);
+    BLOOM_CUDA_CALL(cudaMemcpy(
+        hostFullQuery.data(),
+        thrust::raw_pointer_cast(d_fullQuery.data()),
+        kQueryLength,
+        cudaMemcpyDeviceToHost
+    ));
+
+    // Build concatenated GPU query with 'N' separators + record tracking
+    const uint64_t perRecordBases = kQueryLength / g_numQueryRecords;
+    std::vector<char> hostConcat;
+    hostConcat.reserve(kQueryLength + g_numQueryRecords - 1);
+
+    g_fastxData->h_queryRecords.resize(kQueryLength);
+    g_fastxData->queryRecordOffsets.reserve(g_numQueryRecords);
+    g_fastxData->queryRecordLengths.reserve(g_numQueryRecords);
+    g_fastxData->queryRecordCount = g_numQueryRecords;
+
+    uint64_t pos = 0;
+    for (uint64_t r = 0; r < g_numQueryRecords; ++r) {
+        uint64_t thisLen = (r == g_numQueryRecords - 1) ? kQueryLength - pos : perRecordBases;
+
+        g_fastxData->queryRecordOffsets.push_back(pos);
+        g_fastxData->queryRecordLengths.push_back(thisLen);
+
+        std::copy(
+            hostFullQuery.begin() + pos,
+            hostFullQuery.begin() + pos + thisLen,
+            g_fastxData->h_queryRecords.begin() + pos
+        );
+        hostConcat.insert(
+            hostConcat.end(), hostFullQuery.begin() + pos, hostFullQuery.begin() + pos + thisLen
+        );
+        pos += thisLen;
+
+        if (r + 1 < g_numQueryRecords) {
+            hostConcat.push_back('N');
+        }
+    }
+
+    // Copy concatenated query to GPU
+    g_fastxData->d_querySequence.resize(hostConcat.size());
+    BLOOM_CUDA_CALL(cudaMemcpy(
+        thrust::raw_pointer_cast(g_fastxData->d_querySequence.data()),
+        hostConcat.data(),
+        hostConcat.size(),
+        cudaMemcpyHostToDevice
+    ));
+    g_fastxData->queryKmers = hostConcat.size() >= 31 ? hostConcat.size() - 31 + 1 : 0;
 
     // Pre-encode packed k-mers for Cuco
     g_fastxData->d_insertPackedKmers.resize(g_fastxData->insertKmers);
@@ -86,7 +143,7 @@ static void prepareFastxData() {
     g_fastxData->d_queryPackedKmers.resize(g_fastxData->queryKmers);
     benchmark_common::gpuEncodePackedKmers<31>(
         thrust::raw_pointer_cast(g_fastxData->d_querySequence.data()),
-        kQueryLength,
+        hostConcat.size(),
         thrust::raw_pointer_cast(g_fastxData->d_queryPackedKmers.data())
     );
 
@@ -216,15 +273,6 @@ class SuperBloomCpuFprFastxFixture : public bm::Fixture {
             cudaMemcpyDeviceToHost
         ));
 
-        // Copy query sequence to host
-        h_querySequence.resize(g_fastxData->d_querySequence.size());
-        BLOOM_CUDA_CALL(cudaMemcpy(
-            h_querySequence.data(),
-            thrust::raw_pointer_cast(g_fastxData->d_querySequence.data()),
-            g_fastxData->d_querySequence.size(),
-            cudaMemcpyDeviceToHost
-        ));
-
         // Compute CPU filter exponents from requested filterBits
         uint64_t targetBits = std::max(filterBits, uint64_t{1} << 22);
         bitExp_ = static_cast<uint8_t>(cuda::std::bit_width(targetBits) - 1);
@@ -239,7 +287,6 @@ class SuperBloomCpuFprFastxFixture : public bm::Fixture {
         }
         handle_ = nullptr;
         h_insertSequence.clear();
-        h_querySequence.clear();
     }
 
     void createFilter() {
@@ -265,7 +312,6 @@ class SuperBloomCpuFprFastxFixture : public bm::Fixture {
     uint8_t blockExp_ = 0;
     void* handle_ = nullptr;
     std::vector<char> h_insertSequence;
-    std::vector<char> h_querySequence;
     benchmark_common::CPUTimer timer;
 };
 
@@ -360,13 +406,18 @@ void runSuperBloomCpuFprFastxBenchmark(SuperBloomCpuFprFastxFixture& fixture, bm
     uint64_t falsePositives = 0;
     for (auto _ : state) {
         fixture.timer.start();
-        auto positives = superbloom_query_sequence(
-            fixture.handle_,
-            reinterpret_cast<const uint8_t*>(fixture.h_querySequence.data()),
-            fixture.h_querySequence.size()
-        );
+        uint64_t iterationPositives = 0;
+        for (uint64_t r = 0; r < g_fastxData->queryRecordCount; ++r) {
+            iterationPositives += static_cast<uint64_t>(superbloom_query_sequence(
+                fixture.handle_,
+                reinterpret_cast<const uint8_t*>(
+                    g_fastxData->h_queryRecords.data() + g_fastxData->queryRecordOffsets[r]
+                ),
+                g_fastxData->queryRecordLengths[r]
+            ));
+        }
         state.SetIterationTime(fixture.timer.elapsed());
-        falsePositives = static_cast<uint64_t>(positives);
+        falsePositives = iterationPositives;
         benchmark::DoNotOptimize(falsePositives);
     }
 
@@ -431,6 +482,22 @@ void parseCustomArgs(int argc, char** argv, std::vector<char*>& benchmarkArgv) {
                 g_insertFastxPath = argv[i];
             } else {
                 std::cerr << "Missing value for --insert-fastx" << std::endl;
+                std::exit(1);
+            }
+            continue;
+        }
+
+        constexpr const char* numRecordsPrefix = "--num-query-records=";
+        if (std::strncmp(arg.c_str(), numRecordsPrefix, std::strlen(numRecordsPrefix)) == 0) {
+            g_numQueryRecords = std::stoul(arg.substr(std::strlen(numRecordsPrefix)));
+            continue;
+        }
+        if (arg == "--num-query-records") {
+            if (i + 1 < argc) {
+                ++i;
+                g_numQueryRecords = std::stoul(argv[i]);
+            } else {
+                std::cerr << "Missing value for --num-query-records" << std::endl;
                 std::exit(1);
             }
             continue;
