@@ -14,12 +14,13 @@ index 2497492..a58b47a 100644
  async-stream = "0.3.6"
 diff --git a/src/ffi.rs b/src/ffi.rs
 new file mode 100644
-index 0000000..41f6323
+index 0000000..f9a4b58
 --- /dev/null
 +++ b/src/ffi.rs
-@@ -0,0 +1,137 @@
-+#![allow(clippy::missing_safety_doc)]
+@@ -0,0 +1,188 @@
++#![allow(clippy::missing_safety_doc, clippy::manual_let_else)]
 +
++use std::ffi::CStr;
 +use std::ffi::c_void;
 +
 +use crate::{MinimizerMode, SuperBloom, SuperBloomConfig};
@@ -77,6 +78,31 @@ index 0000000..41f6323
 +}
 +
 +#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_insert_fastx_path(
++    handle: *mut c_void,
++    path: *const std::ffi::c_char,
++) -> i64 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() || path.is_null() {
++            return -1;
++        }
++
++        let bloom = unsafe { &mut *handle.cast::<SuperBloom>() };
++        let path = match unsafe { CStr::from_ptr(path) }.to_str() {
++            Ok(path) => path,
++            Err(_) => return -1,
++        };
++
++        match bloom.add_fasta(path) {
++            Ok(report) => report.kmers_added.cast_signed(),
++            Err(_) => -1,
++        }
++    });
++
++    result.unwrap_or(-1)
++}
++
++#[unsafe(no_mangle)]
 +pub unsafe extern "C" fn superbloom_query_sequence(
 +    handle: *const c_void,
 +    seq: *const u8,
@@ -92,6 +118,31 @@ index 0000000..41f6323
 +
 +        match bloom.query_sequence(sequence) {
 +            Ok(results) => results.iter().map(|&b| b as i64).sum(),
++            Err(_) => -1,
++        }
++    });
++
++    result.unwrap_or(-1)
++}
++
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn superbloom_query_fastx_path(
++    handle: *const c_void,
++    path: *const std::ffi::c_char,
++) -> i64 {
++    let result = std::panic::catch_unwind(|| {
++        if handle.is_null() || path.is_null() {
++            return -1;
++        }
++
++        let bloom = unsafe { &*handle.cast::<SuperBloom>() };
++        let path = match unsafe { CStr::from_ptr(path) }.to_str() {
++            Ok(path) => path,
++            Err(_) => return -1,
++        };
++
++        match bloom.query_fasta(path) {
++            Ok(report) => report.positive_kmers.cast_signed(),
 +            Err(_) => -1,
 +        }
 +    });

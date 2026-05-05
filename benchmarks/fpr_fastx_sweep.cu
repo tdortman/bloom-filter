@@ -8,11 +8,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include <bloom/BloomFilter.cuh>
 #include <bloom/device_span.cuh>
@@ -31,11 +34,10 @@ struct FastxData {
     thrust::device_vector<char> d_querySequence;
     uint64_t queryKmers = 0;
 
-    // Query split into records (for CPU parallelism)
-    std::vector<char> h_queryRecords;
-    std::vector<uint64_t> queryRecordOffsets;
-    std::vector<uint64_t> queryRecordLengths;
-    uint64_t queryRecordCount = 0;
+    // CPU SuperBloom parallelizes one thread per FASTX record, so keep an
+    // explicit FASTA stream with a user-controlled record count.
+    std::string queryFastxPath;
+    uint64_t queryFastxKmers = 0;
 
     // Pre-encoded packed k-mers for Cuco
     thrust::device_vector<uint64_t> d_insertPackedKmers;
@@ -47,9 +49,51 @@ static std::string g_insertFastxPath;
 
 static constexpr uint64_t kQueryLength = 1'000'000'000ULL;
 static constexpr uint64_t kQuerySeed = 0xDEADBEEF;
-static uint64_t g_numQueryRecords = 70;
+static uint64_t g_numQueryRecords =
+    std::max<uint64_t>(1, static_cast<uint64_t>(std::thread::hardware_concurrency()));
 
 using CucoBloom = cuco::bloom_filter<uint64_t>;
+
+static std::string writeGeneratedQueryFasta(
+    const std::vector<char>& sequence,
+    uint64_t numRecords,
+    uint64_t& totalKmers
+) {
+    if (numRecords == 0) {
+        std::cerr << "Error: --num-query-records must be >= 1" << std::endl;
+        std::exit(1);
+    }
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto fileName = "bloom-fpr-fastx-sweep-" + std::to_string(getpid()) + "-" +
+                          std::to_string(numRecords) + ".fasta";
+    const auto path = tempDir / fileName;
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        std::cerr << "Error: failed to create temporary FASTA at " << path << std::endl;
+        std::exit(1);
+    }
+
+    totalKmers = 0;
+    const uint64_t perRecordBases = sequence.size() / numRecords;
+    uint64_t pos = 0;
+    for (uint64_t r = 0; r < numRecords; ++r) {
+        const uint64_t thisLen = (r == numRecords - 1) ? sequence.size() - pos : perRecordBases;
+        out << ">query_" << r << '\n';
+        out.write(sequence.data() + pos, static_cast<std::streamsize>(thisLen));
+        out.put('\n');
+        totalKmers += thisLen >= 31 ? thisLen - 31 + 1 : 0;
+        pos += thisLen;
+    }
+
+    if (!out) {
+        std::cerr << "Error: failed while writing temporary FASTA at " << path << std::endl;
+        std::exit(1);
+    }
+
+    return path.string();
+}
 
 static void prepareFastxData() {
     if (g_fastxData) {
@@ -90,28 +134,14 @@ static void prepareFastxData() {
         cudaMemcpyDeviceToHost
     ));
 
-    // Build concatenated GPU query with 'N' separators + record tracking
+    // Build concatenated GPU query with 'N' separators.
     const uint64_t perRecordBases = kQueryLength / g_numQueryRecords;
     std::vector<char> hostConcat;
     hostConcat.reserve(kQueryLength + g_numQueryRecords - 1);
 
-    g_fastxData->h_queryRecords.resize(kQueryLength);
-    g_fastxData->queryRecordOffsets.reserve(g_numQueryRecords);
-    g_fastxData->queryRecordLengths.reserve(g_numQueryRecords);
-    g_fastxData->queryRecordCount = g_numQueryRecords;
-
     uint64_t pos = 0;
     for (uint64_t r = 0; r < g_numQueryRecords; ++r) {
         uint64_t thisLen = (r == g_numQueryRecords - 1) ? kQueryLength - pos : perRecordBases;
-
-        g_fastxData->queryRecordOffsets.push_back(pos);
-        g_fastxData->queryRecordLengths.push_back(thisLen);
-
-        std::copy(
-            hostFullQuery.begin() + pos,
-            hostFullQuery.begin() + pos + thisLen,
-            g_fastxData->h_queryRecords.begin() + pos
-        );
         hostConcat.insert(
             hostConcat.end(), hostFullQuery.begin() + pos, hostFullQuery.begin() + pos + thisLen
         );
@@ -131,6 +161,8 @@ static void prepareFastxData() {
         cudaMemcpyHostToDevice
     ));
     g_fastxData->queryKmers = hostConcat.size() >= 31 ? hostConcat.size() - 31 + 1 : 0;
+    g_fastxData->queryFastxPath =
+        writeGeneratedQueryFasta(hostFullQuery, g_numQueryRecords, g_fastxData->queryFastxKmers);
 
     // Pre-encode packed k-mers for Cuco
     g_fastxData->d_insertPackedKmers.resize(g_fastxData->insertKmers);
@@ -406,18 +438,14 @@ void runSuperBloomCpuFprFastxBenchmark(SuperBloomCpuFprFastxFixture& fixture, bm
     uint64_t falsePositives = 0;
     for (auto _ : state) {
         fixture.timer.start();
-        uint64_t iterationPositives = 0;
-        for (uint64_t r = 0; r < g_fastxData->queryRecordCount; ++r) {
-            iterationPositives += static_cast<uint64_t>(superbloom_query_sequence(
-                fixture.handle_,
-                reinterpret_cast<const uint8_t*>(
-                    g_fastxData->h_queryRecords.data() + g_fastxData->queryRecordOffsets[r]
-                ),
-                g_fastxData->queryRecordLengths[r]
-            ));
+        const int64_t iterationPositives =
+            superbloom_query_fastx_path(fixture.handle_, g_fastxData->queryFastxPath.c_str());
+        if (iterationPositives < 0) {
+            state.SkipWithError("superbloom_query_fastx_path failed");
+            return;
         }
         state.SetIterationTime(fixture.timer.elapsed());
-        falsePositives = iterationPositives;
+        falsePositives = static_cast<uint64_t>(iterationPositives);
         benchmark::DoNotOptimize(falsePositives);
     }
 
@@ -426,9 +454,9 @@ void runSuperBloomCpuFprFastxBenchmark(SuperBloomCpuFprFastxFixture& fixture, bm
         fixture.actualFilterBits,
         fixture.filterMemory,
         g_fastxData->insertKmers,
-        g_fastxData->queryKmers
+        g_fastxData->queryFastxKmers
     );
-    benchmark_common::setFprCounters(state, falsePositives, g_fastxData->queryKmers);
+    benchmark_common::setFprCounters(state, falsePositives, g_fastxData->queryFastxKmers);
 }
 
 #define DEFINE_SUPERBLOOM_FPR_FASTX_BENCHMARK(S)                    \
