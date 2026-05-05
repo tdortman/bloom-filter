@@ -1,6 +1,10 @@
 #include <benchmark/benchmark.h>
 
 #include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <vector>
 
 #include "benchmark_common.cuh"
 
@@ -22,8 +26,8 @@
 
 FOR_EACH_SUPERBLOOM_CONFIG(BENCHMARK_DEFINE_SUPERBLOOM_CONFIG_AND_FIXTURE)
 
-#define BENCHMARK_DEFINE_SUPERBLOOM_CPU_FIXTURE(K, S, M, H)                            \
-    using BENCHMARK_SUPERBLOOM_CPU_FIXTURE_SYMBOL(K, S, M, H) =                         \
+#define BENCHMARK_DEFINE_SUPERBLOOM_CPU_FIXTURE(K, S, M, H)     \
+    using BENCHMARK_SUPERBLOOM_CPU_FIXTURE_SYMBOL(K, S, M, H) = \
         benchmark_common::SuperBloomCpuFixture<BENCHMARK_SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H)>;
 
 FOR_EACH_SUPERBLOOM_CONFIG(BENCHMARK_DEFINE_SUPERBLOOM_CPU_FIXTURE)
@@ -91,4 +95,49 @@ SUPERBLOOM_CONFIGS_FPR_ONLY(REGISTER_CPU_FPR_ONLY)
 #undef SUPERBLOOM_CONFIGS_INSERT_QUERY_FPR
 #undef SUPERBLOOM_FIRST_INSERT_QUERY_FPR_CONFIG
 
-STANDARD_BENCHMARK_MAIN()
+int main(int argc, char** argv) {
+    benchmark_common::g_cpuFastxParallelizeRecords = true;
+
+    std::vector<char*> benchmarkArgv;
+    benchmarkArgv.reserve(argc);
+    benchmarkArgv.push_back(argv[0]);
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        constexpr const char* numRecordsPrefix = "--num-query-records=";
+        if (std::strncmp(arg.c_str(), numRecordsPrefix, std::strlen(numRecordsPrefix)) == 0) {
+            benchmark_common::g_cpuFastxParallelizeRecords = true;
+            benchmark_common::g_cpuFastxNumRecords =
+                std::stoull(arg.substr(std::strlen(numRecordsPrefix)));
+            continue;
+        }
+        if (arg == "--num-query-records") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for --num-query-records" << std::endl;
+                return 1;
+            }
+            benchmark_common::g_cpuFastxParallelizeRecords = true;
+            benchmark_common::g_cpuFastxNumRecords = std::stoull(argv[++i]);
+            continue;
+        }
+
+        benchmarkArgv.push_back(argv[i]);
+    }
+
+    if (benchmark_common::g_cpuFastxParallelizeRecords &&
+        benchmark_common::g_cpuFastxNumRecords == 0) {
+        std::cerr << "--num-query-records must be >= 1" << std::endl;
+        return 1;
+    }
+
+    int benchmarkArgc = static_cast<int>(benchmarkArgv.size());
+    ::benchmark::Initialize(&benchmarkArgc, benchmarkArgv.data());
+    if (::benchmark::ReportUnrecognizedArguments(benchmarkArgc, benchmarkArgv.data())) {
+        return 1;
+    }
+    ::benchmark::RunSpecifiedBenchmarks();
+    ::benchmark::Shutdown();
+    fflush(stdout);
+    std::_Exit(0);
+}

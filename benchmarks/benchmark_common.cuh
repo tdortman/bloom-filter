@@ -15,10 +15,16 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include <unistd.h>
 
 #include <cuda/std/bit>
 
@@ -28,6 +34,58 @@
 #include <bloom/superbloom_ffi.hpp>
 
 namespace benchmark_common {
+
+inline bool g_cpuFastxParallelizeRecords = false;
+inline uint64_t g_cpuFastxNumRecords =
+    std::max<uint64_t>(1, static_cast<uint64_t>(std::thread::hardware_concurrency()));
+
+inline uint64_t splitSequenceKmers(uint64_t sequenceLength, uint64_t numRecords, uint64_t k) {
+    if (numRecords == 0) {
+        return 0;
+    }
+
+    const uint64_t perRecordBases = sequenceLength / numRecords;
+    uint64_t totalKmers = 0;
+    uint64_t pos = 0;
+    for (uint64_t r = 0; r < numRecords; ++r) {
+        const uint64_t thisLen = (r == numRecords - 1) ? sequenceLength - pos : perRecordBases;
+        totalKmers += thisLen >= k ? thisLen - k + 1 : 0;
+        pos += thisLen;
+    }
+    return totalKmers;
+}
+
+inline std::string
+writeGeneratedFasta(const std::vector<char>& sequence, uint64_t numRecords, const char* prefix) {
+    if (numRecords == 0) {
+        throw std::runtime_error("FASTA record count must be >= 1");
+    }
+
+    const auto tempDir = std::filesystem::temp_directory_path();
+    const auto path = tempDir / (std::string(prefix) + "-" + std::to_string(getpid()) + "-" +
+                                 std::to_string(numRecords) + ".fasta");
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("failed to create temporary FASTA file");
+    }
+
+    const uint64_t perRecordBases = sequence.size() / numRecords;
+    uint64_t pos = 0;
+    for (uint64_t r = 0; r < numRecords; ++r) {
+        const uint64_t thisLen = (r == numRecords - 1) ? sequence.size() - pos : perRecordBases;
+        out << ">record_" << r << '\n';
+        out.write(sequence.data() + pos, static_cast<std::streamsize>(thisLen));
+        out.put('\n');
+        pos += thisLen;
+    }
+
+    if (!out) {
+        throw std::runtime_error("failed while writing temporary FASTA file");
+    }
+
+    return path.string();
+}
 
 class GPUTimer {
    public:
@@ -452,7 +510,7 @@ void runSuperBloomFpr(Fixture& fixture, benchmark::State& state) {
     setFprCounters(state, falsePositives, fixture.numKmers);
 }
 
-// CPU SuperBloom fixture and runners 
+// CPU SuperBloom fixture and runners
 
 /// Compute the bit_vector_size_exponent and block_size_exponent for a CPU
 /// SuperBloom filter that gives at least 16 bits per item while satisfying
@@ -483,7 +541,9 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
         initFailed_ = false;
         sequenceLength = static_cast<uint64_t>(state.range(0));
         benchData = &getBenchmarkData<Config::k, Alphabet>(sequenceLength);
-        numKmers = benchData->numKmers;
+        numKmers = g_cpuFastxParallelizeRecords
+                       ? splitSequenceKmers(sequenceLength, g_cpuFastxNumRecords, Config::k)
+                       : benchData->numKmers;
 
         cpuFilterExponents(numKmers, bitVectorSizeExp, blockSizeExp);
 
@@ -501,11 +561,24 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
     }
 
     void TearDown(const benchmark::State&) override {
-        if (handle_) superbloom_destroy(handle_);
+        if (handle_)
+            superbloom_destroy(handle_);
         handle_ = nullptr;
         benchData = nullptr;
         h_output.clear();
         h_sequence.clear();
+        if (!throughputFastxPath.empty()) {
+            std::filesystem::remove(throughputFastxPath);
+            throughputFastxPath.clear();
+        }
+        if (!fprInsertFastxPath.empty()) {
+            std::filesystem::remove(fprInsertFastxPath);
+            fprInsertFastxPath.clear();
+        }
+        if (!fprQueryFastxPath.empty()) {
+            std::filesystem::remove(fprQueryFastxPath);
+            fprQueryFastxPath.clear();
+        }
     }
 
     void setCounters(benchmark::State& state) const {
@@ -515,7 +588,8 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
     }
 
     void ensureHostSequence() {
-        if (!h_sequence.empty() || sequenceLength == 0) return;
+        if (!h_sequence.empty() || sequenceLength == 0)
+            return;
         h_sequence.resize(sequenceLength);
         BLOOM_CUDA_CALL(cudaMemcpy(
             h_sequence.data(),
@@ -528,12 +602,53 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
     void recreateFilter() {
         superbloom_destroy(handle_);
         handle_ = superbloom_create(
-            Config::k, Config::m, Config::s, Config::hashCount,
-            bitVectorSizeExp, blockSizeExp
+            Config::k, Config::m, Config::s, Config::hashCount, bitVectorSizeExp, blockSizeExp
         );
         if (handle_ && threadCount_ > 0) {
             superbloom_set_threads(handle_, threadCount_);
         }
+    }
+
+    void ensureThroughputFastxPath() {
+        if (!g_cpuFastxParallelizeRecords || !throughputFastxPath.empty()) {
+            return;
+        }
+        ensureHostSequence();
+        throughputFastxPath = writeGeneratedFasta(
+            h_sequence, g_cpuFastxNumRecords, "bloom-cpu-filter-comparison-throughput"
+        );
+    }
+
+    void ensureFprFastxPaths() {
+        if (!g_cpuFastxParallelizeRecords ||
+            (!fprInsertFastxPath.empty() && !fprQueryFastxPath.empty())) {
+            return;
+        }
+
+        benchData->ensureFprData();
+
+        std::vector<char> fprHostSeq(sequenceLength);
+        BLOOM_CUDA_CALL(cudaMemcpy(
+            fprHostSeq.data(),
+            thrust::raw_pointer_cast(benchData->d_fprInsertSequence.data()),
+            sequenceLength,
+            cudaMemcpyDeviceToHost
+        ));
+
+        std::vector<char> zeroHostSeq(sequenceLength);
+        BLOOM_CUDA_CALL(cudaMemcpy(
+            zeroHostSeq.data(),
+            thrust::raw_pointer_cast(benchData->d_zeroOverlapSequence.data()),
+            sequenceLength,
+            cudaMemcpyDeviceToHost
+        ));
+
+        fprInsertFastxPath = writeGeneratedFasta(
+            fprHostSeq, g_cpuFastxNumRecords, "bloom-cpu-filter-comparison-fpr-insert"
+        );
+        fprQueryFastxPath = writeGeneratedFasta(
+            zeroHostSeq, g_cpuFastxNumRecords, "bloom-cpu-filter-comparison-fpr-query"
+        );
     }
 
     uint64_t sequenceLength{};
@@ -544,6 +659,9 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
     BenchmarkData<Config::k, Alphabet>* benchData{};
     std::vector<uint8_t> h_output;
     std::vector<char> h_sequence;
+    std::string throughputFastxPath;
+    std::string fprInsertFastxPath;
+    std::string fprQueryFastxPath;
     void* handle_{};
     bool initFailed_ = false;
     size_t threadCount_ = 0;
@@ -552,7 +670,11 @@ class SuperBloomCpuFixture : public benchmark::Fixture {
 
 template <typename Fixture>
 void runSuperBloomCpuInsert(Fixture& fixture, benchmark::State& state) {
-    fixture.ensureHostSequence();
+    if (g_cpuFastxParallelizeRecords) {
+        fixture.ensureThroughputFastxPath();
+    } else {
+        fixture.ensureHostSequence();
+    }
 
     for (auto _ : state) {
         fixture.recreateFilter();
@@ -562,11 +684,18 @@ void runSuperBloomCpuInsert(Fixture& fixture, benchmark::State& state) {
         }
 
         fixture.timer.start();
-        auto added = superbloom_insert_sequence(
-            fixture.handle_,
-            reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
-            fixture.sequenceLength
-        );
+        auto added =
+            g_cpuFastxParallelizeRecords
+                ? superbloom_insert_fastx_path(fixture.handle_, fixture.throughputFastxPath.c_str())
+                : superbloom_insert_sequence(
+                      fixture.handle_,
+                      reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
+                      fixture.sequenceLength
+                  );
+        if (added < 0) {
+            state.SkipWithError("superbloom insert failed");
+            return;
+        }
         state.SetIterationTime(fixture.timer.elapsed());
         benchmark::DoNotOptimize(added);
     }
@@ -575,27 +704,49 @@ void runSuperBloomCpuInsert(Fixture& fixture, benchmark::State& state) {
 
 template <typename Fixture>
 void runSuperBloomCpuQuery(Fixture& fixture, benchmark::State& state) {
-    fixture.ensureHostSequence();
+    if (g_cpuFastxParallelizeRecords) {
+        fixture.ensureThroughputFastxPath();
+    } else {
+        fixture.ensureHostSequence();
+    }
 
     fixture.recreateFilter();
     if (!fixture.handle_) {
         state.SkipWithError("superbloom_create failed");
         return;
     }
-    superbloom_insert_sequence(
-        fixture.handle_,
-        reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
-        fixture.sequenceLength
-    );
+    if (g_cpuFastxParallelizeRecords) {
+        if (superbloom_insert_fastx_path(fixture.handle_, fixture.throughputFastxPath.c_str()) <
+            0) {
+            state.SkipWithError("superbloom insert failed");
+            return;
+        }
+    } else {
+        if (superbloom_insert_sequence(
+                fixture.handle_,
+                reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
+                fixture.sequenceLength
+            ) < 0) {
+            state.SkipWithError("superbloom insert failed");
+            return;
+        }
+    }
     superbloom_freeze(fixture.handle_);
 
     for (auto _ : state) {
         fixture.timer.start();
-        auto positives = superbloom_query_sequence(
-            fixture.handle_,
-            reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
-            fixture.sequenceLength
-        );
+        auto positives =
+            g_cpuFastxParallelizeRecords
+                ? superbloom_query_fastx_path(fixture.handle_, fixture.throughputFastxPath.c_str())
+                : superbloom_query_sequence(
+                      fixture.handle_,
+                      reinterpret_cast<const uint8_t*>(fixture.h_sequence.data()),
+                      fixture.sequenceLength
+                  );
+        if (positives < 0) {
+            state.SkipWithError("superbloom query failed");
+            return;
+        }
         state.SetIterationTime(fixture.timer.elapsed());
         benchmark::DoNotOptimize(positives);
     }
@@ -604,44 +755,69 @@ void runSuperBloomCpuQuery(Fixture& fixture, benchmark::State& state) {
 
 template <typename Fixture>
 void runSuperBloomCpuFpr(Fixture& fixture, benchmark::State& state) {
-    fixture.benchData->ensureFprData();
+    if (g_cpuFastxParallelizeRecords) {
+        fixture.ensureFprFastxPaths();
+    } else {
+        fixture.benchData->ensureFprData();
+    }
 
     std::vector<char> fprHostSeq(fixture.sequenceLength);
-    BLOOM_CUDA_CALL(cudaMemcpy(
-        fprHostSeq.data(),
-        thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
-        fixture.sequenceLength,
-        cudaMemcpyDeviceToHost
-    ));
+    if (!g_cpuFastxParallelizeRecords) {
+        BLOOM_CUDA_CALL(cudaMemcpy(
+            fprHostSeq.data(),
+            thrust::raw_pointer_cast(fixture.benchData->d_fprInsertSequence.data()),
+            fixture.sequenceLength,
+            cudaMemcpyDeviceToHost
+        ));
+    }
 
     std::vector<char> zeroHostSeq(fixture.sequenceLength);
-    BLOOM_CUDA_CALL(cudaMemcpy(
-        zeroHostSeq.data(),
-        thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
-        fixture.sequenceLength,
-        cudaMemcpyDeviceToHost
-    ));
+    if (!g_cpuFastxParallelizeRecords) {
+        BLOOM_CUDA_CALL(cudaMemcpy(
+            zeroHostSeq.data(),
+            thrust::raw_pointer_cast(fixture.benchData->d_zeroOverlapSequence.data()),
+            fixture.sequenceLength,
+            cudaMemcpyDeviceToHost
+        ));
+    }
 
     fixture.recreateFilter();
     if (!fixture.handle_) {
         state.SkipWithError("superbloom_create failed");
         return;
     }
-    superbloom_insert_sequence(
-        fixture.handle_,
-        reinterpret_cast<const uint8_t*>(fprHostSeq.data()),
-        fixture.sequenceLength
-    );
+    if (g_cpuFastxParallelizeRecords) {
+        if (superbloom_insert_fastx_path(fixture.handle_, fixture.fprInsertFastxPath.c_str()) < 0) {
+            state.SkipWithError("superbloom insert failed");
+            return;
+        }
+    } else {
+        if (superbloom_insert_sequence(
+                fixture.handle_,
+                reinterpret_cast<const uint8_t*>(fprHostSeq.data()),
+                fixture.sequenceLength
+            ) < 0) {
+            state.SkipWithError("superbloom insert failed");
+            return;
+        }
+    }
     superbloom_freeze(fixture.handle_);
 
     uint64_t falsePositives = 0;
     for (auto _ : state) {
         fixture.timer.start();
-        auto positives = superbloom_query_sequence(
-            fixture.handle_,
-            reinterpret_cast<const uint8_t*>(zeroHostSeq.data()),
-            fixture.sequenceLength
-        );
+        auto positives =
+            g_cpuFastxParallelizeRecords
+                ? superbloom_query_fastx_path(fixture.handle_, fixture.fprQueryFastxPath.c_str())
+                : superbloom_query_sequence(
+                      fixture.handle_,
+                      reinterpret_cast<const uint8_t*>(zeroHostSeq.data()),
+                      fixture.sequenceLength
+                  );
+        if (positives < 0) {
+            state.SkipWithError("superbloom query failed");
+            return;
+        }
         state.SetIterationTime(fixture.timer.elapsed());
         falsePositives = static_cast<uint64_t>(positives);
         benchmark::DoNotOptimize(falsePositives);
@@ -652,7 +828,6 @@ void runSuperBloomCpuFpr(Fixture& fixture, benchmark::State& state) {
 }
 
 }  // namespace benchmark_common
-
 
 #define BENCHMARK_SUPERBLOOM_CONFIG_SYMBOL(K, S, M, H) SuperBloom_K##K##_S##S##_M##M##_H##H##_Config
 #define BENCHMARK_SUPERBLOOM_FIXTURE_SYMBOL(K, S, M, H) \
@@ -681,20 +856,20 @@ void runSuperBloomCpuFpr(Fixture& fixture, benchmark::State& state) {
         benchmark_common::runSuperBloomFpr(*this, state);            \
     }
 
-#define BENCHMARK_DEFINE_SUPERBLOOM_CPU_ALL(FixtureName)                    \
-    BENCHMARK_DEFINE_F(FixtureName, Insert)(benchmark::State & state) {     \
-        benchmark_common::runSuperBloomCpuInsert(*this, state);             \
-    }                                                                       \
-    BENCHMARK_DEFINE_F(FixtureName, Query)(benchmark::State & state) {      \
-        benchmark_common::runSuperBloomCpuQuery(*this, state);              \
-    }                                                                       \
-    BENCHMARK_DEFINE_F(FixtureName, FPR)(benchmark::State & state) {        \
-        benchmark_common::runSuperBloomCpuFpr(*this, state);                \
+#define BENCHMARK_DEFINE_SUPERBLOOM_CPU_ALL(FixtureName)                \
+    BENCHMARK_DEFINE_F(FixtureName, Insert)(benchmark::State & state) { \
+        benchmark_common::runSuperBloomCpuInsert(*this, state);         \
+    }                                                                   \
+    BENCHMARK_DEFINE_F(FixtureName, Query)(benchmark::State & state) {  \
+        benchmark_common::runSuperBloomCpuQuery(*this, state);          \
+    }                                                                   \
+    BENCHMARK_DEFINE_F(FixtureName, FPR)(benchmark::State & state) {    \
+        benchmark_common::runSuperBloomCpuFpr(*this, state);            \
     }
 
-#define BENCHMARK_DEFINE_SUPERBLOOM_CPU_FPR_ONLY(FixtureName)            \
-    BENCHMARK_DEFINE_F(FixtureName, FPR)(benchmark::State & state) {     \
-        benchmark_common::runSuperBloomCpuFpr(*this, state);             \
+#define BENCHMARK_DEFINE_SUPERBLOOM_CPU_FPR_ONLY(FixtureName)        \
+    BENCHMARK_DEFINE_F(FixtureName, FPR)(benchmark::State & state) { \
+        benchmark_common::runSuperBloomCpuFpr(*this, state);         \
     }
 
 #define BENCHMARK_REGISTER_SUPERBLOOM_ALL(FixtureName) \
@@ -709,7 +884,8 @@ void runSuperBloomCpuFpr(Fixture& fixture, benchmark::State& state) {
     REGISTER_BENCHMARK(FixtureName, Query);                \
     REGISTER_BENCHMARK(FixtureName, FPR);
 
-#define BENCHMARK_REGISTER_SUPERBLOOM_CPU_FPR_ONLY(FixtureName) REGISTER_BENCHMARK(FixtureName, FPR);
+#define BENCHMARK_REGISTER_SUPERBLOOM_CPU_FPR_ONLY(FixtureName) \
+    REGISTER_BENCHMARK(FixtureName, FPR);
 
 #define BENCHMARK_CONFIG                \
     ->RangeMultiplier(2)                \
