@@ -9,7 +9,6 @@ build
 !/subprojects/*.wrap
 /subprojects/moderngpu.wrap
 /subprojects/openssl.wrap
-/subprojects/zlib.wrap
 /subprojects/gossip.wrap
 
 *.*-rep

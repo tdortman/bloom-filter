@@ -1,4 +1,4 @@
 [wrap-git]
 url = https://github.com/tdortman/Cuckoo-GPU.git
-revision = 766bb23c4e6f819bf7443b76214c2bf585705a2b
+revision = a0fc21594fe47bc9542e1b64d5c85303fb4c265e
 depth = 1
