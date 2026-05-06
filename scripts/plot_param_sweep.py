@@ -131,7 +131,15 @@ def main(
         subset["pareto"] = compute_pareto_mask(subset, "fpr", time_col)
         n_total = len(subset)
 
-        figsize = (18, 12) if n_total > 40 else (12, 8)
+        dominated_marker_size = 180
+        pareto_marker_size = 520
+        marker_edge_width = 1.0
+        frontier_line_width = 2.5
+        axis_label_size = pu.AXIS_LABEL_FONT_SIZE + 4
+        tick_label_size = pu.TICK_LABEL_FONT_SIZE + 4
+        legend_font_size = pu.LEGEND_FONT_SIZE + 2
+
+        figsize = (20, 14) if n_total > 40 else (15, 10)
         fig, ax = plt.subplots(figsize=figsize)
 
         # Plot all points coloured by M
@@ -149,10 +157,10 @@ def main(
                         m_group["fpr"],
                         m_group[time_col],
                         c=[color],
-                        s=120,
+                        s=pareto_marker_size,
                         alpha=0.95,
                         edgecolors="black",
-                        linewidths=0.5,
+                        linewidths=marker_edge_width,
                         zorder=4,
                     )
                 else:
@@ -160,15 +168,15 @@ def main(
                         m_group["fpr"],
                         m_group[time_col],
                         c=[color],
-                        s=50,
+                        s=dominated_marker_size,
                         alpha=0.4,
                         zorder=2,
                     )
 
         # Labels for all points
-        offsets = [(10, 10), (-10, -10), (10, -10), (-10, 10)]
-        dominated_label_size = 9 if n_total <= 40 else 8
-        pareto_label_size = 11 if n_total <= 40 else 9
+        offsets = [(14, 14), (-14, -14), (14, -14), (-14, 14)]
+        dominated_label_size = 13 if n_total <= 40 else 11
+        pareto_label_size = 16 if n_total <= 40 else 14
 
         for _, row in subset[~subset["pareto"]].iterrows():
             ox, oy = offsets[int(row["s"]) % 4]
@@ -205,14 +213,15 @@ def main(
                 "--",
                 color="#2E86AB",
                 alpha=0.5,
-                linewidth=1.5,
+                linewidth=frontier_line_width,
                 zorder=1,
             )
 
-        ax.set_xlabel("FPR [%]", fontsize=pu.AXIS_LABEL_FONT_SIZE, fontweight="bold")
-        ax.set_ylabel(y_label, fontsize=pu.AXIS_LABEL_FONT_SIZE, fontweight="bold")
+        ax.set_xlabel("FPR [%]", fontsize=axis_label_size, fontweight="bold")
+        ax.set_ylabel(y_label, fontsize=axis_label_size, fontweight="bold")
         ax.set_xscale("log")
         ax.set_yscale("log")
+        ax.tick_params(axis="both", labelsize=tick_label_size)
         ax.grid(True, which="both", ls="--", alpha=pu.GRID_ALPHA)
 
         # Legend: M values as coloured patches
@@ -223,7 +232,7 @@ def main(
         ]
         ax.legend(
             handles=legend_elements,
-            fontsize=pu.LEGEND_FONT_SIZE,
+            fontsize=legend_font_size,
             loc="upper left",
             framealpha=0,
         )
