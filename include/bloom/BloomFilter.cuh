@@ -110,6 +110,10 @@ struct Config {
         hashCount >= blockWordCount,
         "Sectorized layout requires hashCount >= blockWordCount"
     );
+    static_assert(
+        hashCount % blockWordCount == 0,
+        "Hash count must distribute evenly across shard words"
+    );
     static_assert(cudaBlockSize % 32 == 0, "CUDA block size must be a multiple of one warp");
     static_assert(
         cudaBlockSize % insertGroupSize == 0,

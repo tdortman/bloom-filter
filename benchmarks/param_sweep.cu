@@ -311,21 +311,18 @@ void runShSweepFpr(Fixture& fixture, benchmark::State& state) {
     REGISTER_PARAM_SWEEP_BENCHMARK(FixtureName, Query);  \
     REGISTER_PARAM_SWEEP_BENCHMARK(FixtureName, FPR);
 
-// H-list: 7 hash values (step 2) for dense coverage.
+// H-list: 4 hash values for dense coverage.
 #define PARAM_SWEEP_H_DEFAULT(MACRO, K, S, M) \
     MACRO(K, S, M, 4)                         \
-    MACRO(K, S, M, 6)                         \
     MACRO(K, S, M, 8)                         \
-    MACRO(K, S, M, 10)                        \
     MACRO(K, S, M, 12)                        \
-    MACRO(K, S, M, 14)                        \
     MACRO(K, S, M, 16)
 
 // 3-D parameter grid:  SxMxH = 16x13x7 = 1456 configs
 // S values: {16..31} (16 values, every integer)
 // M values: {8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 31} (13 values, step 2)
-// H values: {4, 6, 8, 10, 12, 14, 16} (7 values, step 2)
-// Split into 208 groups (one per S,M pair), each with 7 configs.
+// H values: {4, 8, 12, 16} (4 values)
+// Split into 208 groups (one per S,M pair), each with 4 configs.
 // Group index = s_idx * 13 + m_idx
 
 #ifndef PARAM_SWEEP_PROTEIN
@@ -575,7 +572,7 @@ void runShSweepFpr(Fixture& fixture, benchmark::State& state) {
     // Protein parameter grid: K=12
     // S values: {6,7,8,9,10,11,12} (7 values)
     // M values: {4,6,8,10,12} (5 values)
-    // H values: {4,6,8,10,12,14,16} (7 values)
+    // H values: {4,8,12,16} (4 values)
     // Groups: 7*5 = 35
 
     // S=6 (groups 0-4)
