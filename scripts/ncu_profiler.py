@@ -6,33 +6,25 @@ from typing import Optional
 import pandas as pd
 import typer
 
-FILTERS = ["cuckoo", "bloom", "tcf", "gqf"]
+FILTERS = ["superbloom", "cucobloom", "cuckoogpu"]
 OPERATIONS = {
-    "cuckoo": ["insert", "query", "delete"],
-    "bloom": ["insert", "query"],
-    "tcf": ["insert", "query", "delete"],
-    "gqf": ["insert", "query", "delete"],
+    "superbloom": ["insert", "query"],
+    "cucobloom": ["insert", "query"],
+    "cuckoogpu": ["insert", "query"],
 }
 
 KERNEL_PATTERNS = {
-    "cuckoo": {
-        "insert": ["insertKernel"],
-        "query": ["containsKernel"],
-        "delete": ["deleteKernel"],
+    "superbloom": {
+        "insert": ["insertSequenceKmersKernel"],
+        "query": ["containsSequenceKmersKernel"],
     },
-    "bloom": {
+    "cucobloom": {
         "insert": ["add"],
         "query": ["contains_if_n"],
     },
-    "tcf": {
-        "insert": ["sorted_bulk_insert_kernel"],
-        "query": ["bulk_sorted_query_kernel"],
-        "delete": ["bulk_sorted_delete_kernel"],
-    },
-    "gqf": {
-        "insert": ["insert_from_buffers_hashed"],
-        "query": ["bulk_get_kernel"],
-        "delete": ["delete_from_buffers_hashed"],
+    "cuckoogpu": {
+        "insert": ["insertKernel"],
+        "query": ["containsKernel"],
     },
 }
 
@@ -56,8 +48,8 @@ def run_ncu_profile(
 
     Args:
         executable: Path to the benchmark executable
-        filter_type: Type of filter (cuckoo, bloom, tcf)
-        operation: Operation (insert, query, delete)
+        filter_type: Type of filter (superbloom, cucobloom, cuckoogpu)
+        operation: Operation (insert, query)
         capacity_exponent: Log2 of capacity (e.g. 20 for 1M)
         load_factor: Load factor (e.g. 0.95)
         metrics: List of NCU metric names to collect

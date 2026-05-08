@@ -81,6 +81,14 @@ executable(
 )
 
 executable(
+    'gpu-filter-profiler',
+    'profiler_benchmark.cu',
+    dependencies: bench_deps + [cli11_dep, cuco_dep, cuckoogpu_dep],
+    cuda_args: cuda_args,
+    install: false,
+)
+
+executable(
     'cpu-filter-comparison',
     'cpu_filter_comparison.cu',
     dependencies: bench_deps + [superbloom_cpu_dep],
