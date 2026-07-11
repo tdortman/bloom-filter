@@ -72,6 +72,9 @@ class filter_ref {
         bool present = true;
         _Pragma("unroll")
         for (uint64_t smer_offset = 0; smer_offset < Config::findereSpan; ++smer_offset) {
+            if (!present) {
+                break;
+            }
             const uint64_t smer_hash =
                 detail::packed_kmer_smer_hash<Config>(packed_kmer, smer_offset);
             detail::forEachHashIndex<Config>(
