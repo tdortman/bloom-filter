@@ -14,6 +14,10 @@ bench_deps = [benchmark_dep, cusbf_dep]
 superbloom_cpu_dep = subproject('superbloom-cpu').get_variable('superbloom_cpu_dep')
 
 benchmarks = {
+    'fastx-line-scan': {
+        'src': 'fastx_line_scan.cpp',
+        'deps': [],
+    },
     'cusbf-host-overhead': {
         'src': 'cusbf_host_overhead.cu',
         'deps': [],
