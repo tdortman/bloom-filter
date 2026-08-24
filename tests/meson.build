@@ -11,6 +11,7 @@ test_exe = executable(
         'test_dense_record_batch.cpp',
         'test_fastx_dispatch.cpp',
         'test_fastx_buffer_reader.cpp',
+        'test_fastx_sequence_scan.cpp',
         'test_fastx_host_limits.cpp',
         'test_normalized_record_batch.cpp',
         'test_query_layout.cpp',
