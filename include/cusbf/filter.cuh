@@ -1756,8 +1756,10 @@ class filter {
         const uint64_t gridSize = cuda::ceil_div(numKmers, Config::cudaBlockSize);
         detail::insert_dense_packed_kmers_kernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
-                input,
-                device_span<block_type>{thrust::raw_pointer_cast(d_shards_.data()), num_shards_}
+                input.words.data(),
+                numKmers,
+                thrust::raw_pointer_cast(d_shards_.data()),
+                num_shards_
             );
         CUSBF_CUDA_TRY(cudaGetLastError());
         return {};
@@ -1785,11 +1787,11 @@ class filter {
             cuda::ceil_div(numKmers, Config::cudaBlockSize * detail::kContainsSequenceStride);
         detail::contains_dense_packed_kmers_kernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
-                input,
-                device_span<const block_type>{
-                    thrust::raw_pointer_cast(d_shards_.data()), num_shards_
-                },
-                d_output
+                input.words.data(),
+                numKmers,
+                thrust::raw_pointer_cast(d_shards_.data()),
+                num_shards_,
+                d_output.data()
             );
         CUSBF_CUDA_TRY(cudaGetLastError());
         return {};
@@ -1811,8 +1813,10 @@ class filter {
 
         detail::insert_sequence_kmers_kernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
-                input,
-                device_span<block_type>{thrust::raw_pointer_cast(d_shards_.data()), num_shards_}
+                input.sequence.data(),
+                numKmers,
+                thrust::raw_pointer_cast(d_shards_.data()),
+                num_shards_
             );
         CUSBF_CUDA_TRY(cudaGetLastError());
         return {};
@@ -1836,11 +1840,11 @@ class filter {
 
         detail::contains_sequence_kmers_kernel<Config>
             <<<gridSize, Config::cudaBlockSize, 0, stream.get()>>>(
-                input,
-                device_span<const block_type>{
-                    thrust::raw_pointer_cast(d_shards_.data()), num_shards_
-                },
-                d_output
+                input.sequence.data(),
+                numKmers,
+                thrust::raw_pointer_cast(d_shards_.data()),
+                num_shards_,
+                d_output.data()
             );
         CUSBF_CUDA_TRY(cudaGetLastError());
         return {};

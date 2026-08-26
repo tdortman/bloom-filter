@@ -12,7 +12,6 @@
 #include <cusbf/detail/filter_common.cuh>
 #include <cusbf/detail/filter_impl.cuh>
 #include <cusbf/detail/sequence_kmer.cuh>
-#include <cusbf/device_span.cuh>
 #include <cusbf/filter_ref.cuh>
 
 namespace cusbf::detail {
@@ -43,8 +42,9 @@ __device__ __forceinline__ void contains_kmers_from_symbol_tile(
     uint64_t block_start_kmer,
     uint64_t block_kmers,
     bool block_all_valid,
-    device_span<const filter_block<Config>> shards,
-    device_span<uint8_t> output
+    const filter_block<Config>* shards,
+    uint64_t num_shards,
+    uint8_t* output
 ) {
     const uint64_t thread_offset = static_cast<uint64_t>(threadIdx.x) * k_stride;
     if (thread_offset >= block_kmers) {
@@ -80,13 +80,13 @@ __device__ __forceinline__ void contains_kmers_from_symbol_tile(
         const uint64_t minimizer_hash = packed_kmer_minimizer_hash<Config>(packed_kmer);
 
         const auto shard_idx =
-            static_cast<uint32_t>(filter_ref<Config>::shard_index(minimizer_hash, shards.size()));
+            static_cast<uint32_t>(filter_ref<Config>::shard_index(minimizer_hash, num_shards));
         const uint32_t peers = __match_any_sync(0xFFFFFFFFu, shard_idx);
         const int leader = __ffs(static_cast<int>(peers)) - 1;
 
         uint64_t w[4];
         if (static_cast<int>(threadIdx.x & 31u) == leader) {
-            load_shard_words4<Config>(shards.data(), shard_idx, w);
+            load_shard_words4<Config>(shards, shard_idx, w);
         }
         w[0] = __shfl_sync(peers, w[0], leader);
         w[1] = __shfl_sync(peers, w[1], leader);
@@ -109,7 +109,8 @@ __device__ __forceinline__ void insert_kmers_from_symbol_tile(
     uint64_t block_start_kmer,
     uint64_t block_kmers,
     bool block_all_valid,
-    device_span<filter_block<Config>> shards,
+    filter_block<Config>* shards,
+    uint64_t num_shards,
     cub::WarpReduce<uint64_t>::TempStorage reduce_storage[warps_per_block][4]
 ) {
     constexpr uint32_t warp_size = 32;
@@ -147,7 +148,7 @@ __device__ __forceinline__ void insert_kmers_from_symbol_tile(
     }
 
     const auto shard_idx =
-        static_cast<uint32_t>(active ? (minimizer_hash & (shards.size() - 1)) : ~threadIdx.x);
+        static_cast<uint32_t>(active ? (minimizer_hash & (num_shards - 1)) : ~threadIdx.x);
 
     const uint32_t lane = threadIdx.x & (warp_size - 1);
     const uint32_t warp_idx = threadIdx.x / warp_size;
@@ -178,16 +179,17 @@ __device__ __forceinline__ void insert_kmers_from_symbol_tile(
  */
 template <typename Config>
 __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_sequence_kmers_kernel(
-    SequenceKmerInput<Config> input,
-    device_span<const filter_block<Config>> shards,
-    device_span<uint8_t> output
+    const char* sequence,
+    uint64_t num_kmers,
+    const filter_block<Config>* shards,
+    uint64_t num_shards,
+    uint8_t* output
 ) {
     constexpr uint32_t k_stride = kContainsSequenceStride;
     constexpr uint64_t sequence_tile_bases = Config::cudaBlockSize * k_stride + Config::k - 1;
 
     __shared__ uint8_t sequence_tile[sequence_tile_bases];
 
-    const uint64_t num_kmers = input.kmerCount();
     const uint64_t block_start_kmer =
         static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize * k_stride;
     if (block_start_kmer >= num_kmers) {
@@ -198,11 +200,17 @@ __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_sequence_km
         min(Config::cudaBlockSize * k_stride, num_kmers - block_start_kmer);
 
     const bool block_all_valid = prepare_sequence_hash_tiles<Config>(
-        input.sequence.data(), block_start_kmer, block_kmers, sequence_tile
+        sequence, block_start_kmer, block_kmers, sequence_tile
     );
 
     contains_kmers_from_symbol_tile<Config, k_stride>(
-        sequence_tile, block_start_kmer, block_kmers, block_all_valid, shards, output
+        sequence_tile,
+        block_start_kmer,
+        block_kmers,
+        block_all_valid,
+        shards,
+        num_shards,
+        output
     );
 }
 
@@ -213,8 +221,10 @@ __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_sequence_km
  */
 template <typename Config>
 __global__ void insert_sequence_kmers_kernel(
-    SequenceKmerInput<Config> input,
-    device_span<filter_block<Config>> shards
+    const char* sequence,
+    uint64_t num_kmers,
+    filter_block<Config>* shards,
+    uint64_t num_shards
 ) {
     constexpr uint64_t sequence_tile_bases = Config::cudaBlockSize + Config::k - 1;
     constexpr uint32_t warps_per_block = Config::cudaBlockSize / 32;
@@ -224,7 +234,6 @@ __global__ void insert_sequence_kmers_kernel(
     __shared__ uint8_t sequence_tile[sequence_tile_bases];
     __shared__ typename WarpReduceWord::TempStorage reduce_storage[warps_per_block][4];
 
-    const uint64_t num_kmers = input.kmerCount();
     const uint64_t block_start_kmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
     if (block_start_kmer >= num_kmers) {
         return;
@@ -233,11 +242,17 @@ __global__ void insert_sequence_kmers_kernel(
     const uint64_t block_kmers = min(Config::cudaBlockSize, num_kmers - block_start_kmer);
 
     const bool block_all_valid = prepare_sequence_hash_tiles<Config>(
-        input.sequence.data(), block_start_kmer, block_kmers, sequence_tile
+        sequence, block_start_kmer, block_kmers, sequence_tile
     );
 
     insert_kmers_from_symbol_tile<Config, warps_per_block>(
-        sequence_tile, block_start_kmer, block_kmers, block_all_valid, shards, reduce_storage
+        sequence_tile,
+        block_start_kmer,
+        block_kmers,
+        block_all_valid,
+        shards,
+        num_shards,
+        reduce_storage
     );
 }
 
@@ -246,9 +261,11 @@ __global__ void insert_sequence_kmers_kernel(
  */
 template <typename Config>
 __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_dense_packed_kmers_kernel(
-    DensePackedKmerInput<Config> input,
-    device_span<const filter_block<Config>> shards,
-    device_span<uint8_t> output
+    const uint64_t* words,
+    uint64_t num_kmers,
+    const filter_block<Config>* shards,
+    uint64_t num_shards,
+    uint8_t* output
 ) {
     constexpr uint32_t k_stride = kContainsSequenceStride;
     constexpr uint64_t sequence_tile_bases = Config::cudaBlockSize * k_stride + Config::k - 1;
@@ -257,7 +274,6 @@ __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_dense_packe
     __shared__ uint64_t word_tile[word_tile_capacity];
     __shared__ uint8_t sequence_tile[sequence_tile_bases];
 
-    const uint64_t num_kmers = input.kmerCount();
     const uint64_t block_start_kmer =
         static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize * k_stride;
     if (block_start_kmer >= num_kmers) {
@@ -268,11 +284,17 @@ __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_dense_packe
         min(Config::cudaBlockSize * k_stride, num_kmers - block_start_kmer);
 
     const bool block_all_valid = prepare_dense_packed_tiles<Config>(
-        input.words.data(), block_start_kmer, block_kmers, word_tile, sequence_tile
+        words, block_start_kmer, block_kmers, word_tile, sequence_tile
     );
 
     contains_kmers_from_symbol_tile<Config, k_stride>(
-        sequence_tile, block_start_kmer, block_kmers, block_all_valid, shards, output
+        sequence_tile,
+        block_start_kmer,
+        block_kmers,
+        block_all_valid,
+        shards,
+        num_shards,
+        output
     );
 }
 
@@ -281,8 +303,10 @@ __global__ __launch_bounds__(Config::cudaBlockSize, 6) void contains_dense_packe
  */
 template <typename Config>
 __global__ void insert_dense_packed_kmers_kernel(
-    DensePackedKmerInput<Config> input,
-    device_span<filter_block<Config>> shards
+    const uint64_t* words,
+    uint64_t num_kmers,
+    filter_block<Config>* shards,
+    uint64_t num_shards
 ) {
     constexpr uint64_t sequence_tile_bases = Config::cudaBlockSize + Config::k - 1;
     constexpr uint32_t warps_per_block = Config::cudaBlockSize / 32;
@@ -294,7 +318,6 @@ __global__ void insert_dense_packed_kmers_kernel(
     __shared__ uint8_t sequence_tile[sequence_tile_bases];
     __shared__ typename WarpReduceWord::TempStorage reduce_storage[warps_per_block][4];
 
-    const uint64_t num_kmers = input.kmerCount();
     const uint64_t block_start_kmer = static_cast<uint64_t>(blockIdx.x) * Config::cudaBlockSize;
     if (block_start_kmer >= num_kmers) {
         return;
@@ -303,11 +326,17 @@ __global__ void insert_dense_packed_kmers_kernel(
     const uint64_t block_kmers = min(Config::cudaBlockSize, num_kmers - block_start_kmer);
 
     const bool block_all_valid = prepare_dense_packed_tiles<Config>(
-        input.words.data(), block_start_kmer, block_kmers, word_tile, sequence_tile
+        words, block_start_kmer, block_kmers, word_tile, sequence_tile
     );
 
     insert_kmers_from_symbol_tile<Config, warps_per_block>(
-        sequence_tile, block_start_kmer, block_kmers, block_all_valid, shards, reduce_storage
+        sequence_tile,
+        block_start_kmer,
+        block_kmers,
+        block_all_valid,
+        shards,
+        num_shards,
+        reduce_storage
     );
 }
 
