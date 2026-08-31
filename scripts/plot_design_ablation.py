@@ -179,6 +179,7 @@ def plot_speedups(data: pd.DataFrame, output_pdf: Path) -> None:
     ]
     text_colors = ("white", "black", "white")
     legend_labels: set[str] = set()
+    contribution_labels = []
     y_min = 0.0
     y_max = 1.0
 
@@ -230,38 +231,23 @@ def plot_speedups(data: pd.DataFrame, output_pdf: Path) -> None:
                 zorder=3,
             )
             legend_labels.add(legend_label)
-            if abs(contribution) >= 0.15:
-                ax.text(
-                    position,
-                    bottom + contribution / 2,
-                    f"{contribution:+.2f}$\\times$",
-                    ha="center",
-                    va="center",
-                    fontsize=6.5,
-                    color=text_color,
-                    fontweight="bold",
-                    zorder=4,
+            contribution_labels.append(
+                (
+                    ax.text(
+                        position,
+                        bottom + contribution / 2,
+                        f"{contribution:+.2f}$\\times$",
+                        ha="center",
+                        va="center",
+                        fontsize=6.5,
+                        color=text_color,
+                        fontweight="bold",
+                        zorder=4,
+                    ),
+                    bottom,
+                    contribution,
                 )
-            elif abs(contribution) >= 0.08:
-                direction = 1 if contribution >= 0.0 else -1
-                ax.annotate(
-                    f"{contribution:+.2f}$\\times$",
-                    xy=(position, bottom + contribution / 2),
-                    xytext=(0, 7 * direction),
-                    textcoords="offset points",
-                    ha="center",
-                    va="bottom" if direction > 0 else "top",
-                    fontsize=6,
-                    color="black",
-                    bbox={
-                        "boxstyle": "round,pad=0.12",
-                        "facecolor": "white",
-                        "edgecolor": color,
-                        "linewidth": 0.6,
-                    },
-                    arrowprops={"arrowstyle": "-", "color": color, "linewidth": 0.6},
-                    zorder=5,
-                )
+            )
 
         ax.hlines(
             full_speedup,
@@ -304,6 +290,20 @@ def plot_speedups(data: pd.DataFrame, output_pdf: Path) -> None:
         handlelength=1.8,
         columnspacing=0.8,
     )
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    bar_width = abs(
+        ax.transData.transform((0.25, 0))[0]
+        - ax.transData.transform((-0.25, 0))[0]
+    )
+    for label, bottom, contribution in contribution_labels:
+        bounds = label.get_window_extent(renderer)
+        segment_height = abs(
+            ax.transData.transform((0, bottom + contribution))[1]
+            - ax.transData.transform((0, bottom))[1]
+        )
+        if bounds.width + 2 > bar_width or bounds.height + 2 > segment_height:
+            label.remove()
     pu.save_figure(
         fig,
         output_pdf,
