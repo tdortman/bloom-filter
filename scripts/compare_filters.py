@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
+from typing import Annotated
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -534,36 +535,50 @@ def prepare_panel(
 
 @app.command()
 def main(
-    csv_gddr7_small: Path = typer.Argument(
-        ...,
-        help="RTX PRO 6000 (GDDR7) throughput CSV for C. elegans (small filter)",
-    ),
-    csv_gddr7_large: Path = typer.Argument(
-        ...,
-        help="RTX PRO 6000 (GDDR7) throughput CSV for human T2T-CHM13 (large filter)",
-    ),
-    csv_hbm3_small: Path = typer.Argument(
-        ...,
-        help="GH200 (HBM3) throughput CSV for C. elegans (small filter)",
-    ),
-    csv_hbm3_large: Path = typer.Argument(
-        ...,
-        help="GH200 (HBM3) throughput CSV for human T2T-CHM13 (large filter)",
-    ),
-    csv_ddr5_small: Path = typer.Argument(
-        ...,
-        help="W9-3595X (DDR5) throughput CSV for C. elegans (Super Bloom CPU)",
-    ),
-    csv_ddr5_large: Path = typer.Argument(
-        ...,
-        help="W9-3595X (DDR5) throughput CSV for human T2T-CHM13 (Super Bloom CPU)",
-    ),
-    output_dir: Optional[Path] = typer.Option(
-        None,
-        "--output-dir",
-        "-o",
-        help="Output directory for plots (default: build/)",
-    ),
+    csv_gddr7_small: Annotated[
+        Path,
+        typer.Argument(
+            help="RTX PRO 6000 (GDDR7) throughput CSV for C. elegans (small filter)"
+        ),
+    ],
+    csv_gddr7_large: Annotated[
+        Path,
+        typer.Argument(
+            help="RTX PRO 6000 (GDDR7) throughput CSV for human T2T-CHM13 (large filter)"
+        ),
+    ],
+    csv_hbm3_small: Annotated[
+        Path,
+        typer.Argument(
+            help="GH200 (HBM3) throughput CSV for C. elegans (small filter)"
+        ),
+    ],
+    csv_hbm3_large: Annotated[
+        Path,
+        typer.Argument(
+            help="GH200 (HBM3) throughput CSV for human T2T-CHM13 (large filter)"
+        ),
+    ],
+    csv_ddr5_small: Annotated[
+        Path,
+        typer.Argument(
+            help="W9-3595X (DDR5) throughput CSV for C. elegans (Super Bloom CPU)"
+        ),
+    ],
+    csv_ddr5_large: Annotated[
+        Path,
+        typer.Argument(
+            help="W9-3595X (DDR5) throughput CSV for human T2T-CHM13 (Super Bloom CPU)"
+        ),
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-dir",
+            "-o",
+            help="Output directory for plots (default: build/)",
+        ),
+    ] = None,
 ):
     """
     Plot Insert/Query throughput [GKmer/s].
