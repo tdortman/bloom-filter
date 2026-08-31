@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 from typing import Annotated
 
 import matplotlib.pyplot as plt
@@ -180,9 +179,9 @@ def plot_bar_on_axis(
     data: dict[str, dict[str, float]],
     filter_order: list[str],
     show_ylabel: bool,
-    bg_data: Optional[dict[str, dict[str, float]]] = None,
-    single_source_filters: Optional[set[str]] = None,
-    ddr5_filters: Optional[set[str]] = None,
+    bg_data: dict[str, dict[str, float]] | None = None,
+    single_source_filters: set[str] | None = None,
+    ddr5_filters: set[str] | None = None,
 ) -> list[Patch]:
     """Plot clustered bars; return legend patches (filters + operations + memory)."""
     n_ops = len(BAR_OPERATIONS)
@@ -380,7 +379,7 @@ def save_bar_subplot(
     chart_data: dict[str, dict[str, float]],
     filter_order: list[str],
     show_ylabel: bool,
-    bg_data: Optional[dict[str, dict[str, float]]],
+    bg_data: dict[str, dict[str, float]] | None,
     single_source_filters: set[str],
     ddr5_filters: set[str],
     ylim: tuple[float, float],
