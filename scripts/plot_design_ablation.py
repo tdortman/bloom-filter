@@ -230,7 +230,7 @@ def plot_speedups(data: pd.DataFrame, output_pdf: Path) -> None:
                 zorder=3,
             )
             legend_labels.add(legend_label)
-            if abs(contribution) >= 0.08:
+            if abs(contribution) >= 0.15:
                 ax.text(
                     position,
                     bottom + contribution / 2,
@@ -241,6 +241,26 @@ def plot_speedups(data: pd.DataFrame, output_pdf: Path) -> None:
                     color=text_color,
                     fontweight="bold",
                     zorder=4,
+                )
+            elif abs(contribution) >= 0.08:
+                direction = 1 if contribution >= 0.0 else -1
+                ax.annotate(
+                    f"{contribution:+.2f}$\\times$",
+                    xy=(position, bottom + contribution / 2),
+                    xytext=(0, 7 * direction),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom" if direction > 0 else "top",
+                    fontsize=6,
+                    color="black",
+                    bbox={
+                        "boxstyle": "round,pad=0.12",
+                        "facecolor": "white",
+                        "edgecolor": color,
+                        "linewidth": 0.6,
+                    },
+                    arrowprops={"arrowstyle": "-", "color": color, "linewidth": 0.6},
+                    zorder=5,
                 )
 
         ax.hlines(
