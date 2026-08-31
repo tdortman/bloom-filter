@@ -4,6 +4,8 @@
 #include <thrust/count.h>
 #include <thrust/device_vector.h>
 #include <thrust/reduce.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
 #include <cuda/std/functional>
 
 #include <algorithm>
@@ -213,6 +215,28 @@ class CuckooGpuFixture : public bm::Fixture {
     benchmark_common::GPUTimer timer;
 };
 
+class CuckooGpuDeduplicatedFixture : public bm::Fixture {
+    using bm::Fixture::SetUp;
+    using bm::Fixture::TearDown;
+
+   public:
+    void SetUp(const bm::State&) override {
+        setup.init();
+        keys.assign(packedKmersBenchBegin(), packedKmersBenchEnd(setup.numKmers));
+        thrust::sort(keys.begin(), keys.end());
+        keys.erase(thrust::unique(keys.begin(), keys.end()), keys.end());
+        setup.numKmers = keys.size();
+    }
+
+    void TearDown(const bm::State&) override {
+        setup.filter.reset();
+    }
+
+    CuckooGpuSetup setup;
+    thrust::device_vector<uint64_t> keys;
+    benchmark_common::GPUTimer timer;
+};
+
 class GqfFixture : public bm::Fixture {
     using bm::Fixture::SetUp;
     using bm::Fixture::TearDown;
@@ -316,6 +340,20 @@ BENCHMARK_DEFINE_F(CuckooGpuFixture, Insert)(bm::State& state) {
     uint64_t* const keys = thrust::raw_pointer_cast(
         benchmark_common::g_fastxInsertWorkload->d_insert_packed_kmers.data()
     );
+    for (auto _ : state) {
+        (void)s.filter->clear();
+        CUSBF_CUDA_CALL(cudaDeviceSynchronize());
+        fix.timer.start();
+        s.filter->insertMany(keys, s.numKmers);
+        state.SetIterationTime(fix.timer.elapsed());
+    }
+    setThroughputCounters(state, s.filter_bits, s.filterMemory, s.numKmers);
+}
+
+BENCHMARK_DEFINE_F(CuckooGpuDeduplicatedFixture, Insert)(bm::State& state) {
+    auto& fix = *static_cast<CuckooGpuDeduplicatedFixture*>(this);
+    auto& s = fix.setup;
+    uint64_t* const keys = thrust::raw_pointer_cast(fix.keys.data());
     for (auto _ : state) {
         (void)s.filter->clear();
         CUSBF_CUDA_CALL(cudaDeviceSynchronize());
@@ -461,6 +499,7 @@ REGISTER_BENCHMARK_THROUGHPUT_FASTX(CucoBloomFixture, Insert);
 REGISTER_BENCHMARK_THROUGHPUT_FASTX(CucoBloomFixture, Query);
 REGISTER_BENCHMARK_THROUGHPUT_FASTX(CuckooGpuFixture, Insert);
 REGISTER_BENCHMARK_THROUGHPUT_FASTX(CuckooGpuFixture, Query);
+REGISTER_BENCHMARK_THROUGHPUT_FASTX(CuckooGpuDeduplicatedFixture, Insert);
 REGISTER_BENCHMARK_THROUGHPUT_FASTX(GqfFixture, Insert);
 REGISTER_BENCHMARK_THROUGHPUT_FASTX(GqfFixture, Query);
 REGISTER_BENCHMARK_THROUGHPUT_FASTX(TcfFixture, Insert);

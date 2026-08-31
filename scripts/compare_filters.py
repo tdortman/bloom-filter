@@ -38,6 +38,7 @@ FILTER_GROUP_ORDER: list[str] = [
     "cusbf",
     "cucobloom",
     "cuckoogpu",
+    "cuckoogpu_dedup",
     "gqf",
     "tcf",
     "superbloom_cpu",
@@ -46,6 +47,7 @@ FILTER_GROUP_ORDER: list[str] = [
 FILTER_LEGEND_LABELS: dict[str, str] = {
     "cusbf": "cuSBF",
     "cuckoogpu": "Cuckoo-GPU",
+    "cuckoogpu_dedup": "Cuckoo-GPU (dedup.)",
     "tcf": "TCF",
     "gqf": "GQF",
     "cucobloom": "GBBF",
@@ -84,6 +86,8 @@ _SUBPLOT_TOP_MARGIN = 0.94
 def normalize_filter_key(fixture_base: str) -> str:
     """Map fixture base names to canonical filter keys."""
     key = fixture_base.lower()
+    if key.startswith("cuckoogpudeduplicated"):
+        return "cuckoogpu_dedup"
     if key.startswith("cuckoogpu"):
         return "cuckoogpu"
     if key.startswith("cucobloom"):
