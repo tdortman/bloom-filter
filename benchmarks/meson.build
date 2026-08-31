@@ -26,6 +26,10 @@ benchmarks = {
         'src': 'dense_packed_throughput.cu',
         'deps': [],
     },
+    'design-ablation': {
+        'src': 'design_ablation.cu',
+        'deps': [],
+    },
     'filter-comparison': {
         'src': 'filter_comparison.cu',
         'deps': [cuco_dep, cuckoogpu_dep, superbloom_cpu_dep, gqf_dep, tcf_dep],
