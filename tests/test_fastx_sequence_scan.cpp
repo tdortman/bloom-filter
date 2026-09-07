@@ -100,6 +100,17 @@ TEST(FastxSequenceScanTest, ExtentsExcludeHeaders) {
     EXPECT_EQ(std::string_view(extents[2].begin, extents[2].end), std::string_view("GGGG\n"));
 }
 
+TEST(FastxSequenceScanTest, HeaderScanningPreservesLineBoundaries) {
+    std::string const text =
+        "ignored > text\n>first > title\r\nAC>GT\r>empty\r>last\nTT\n>trailing";
+    auto extents = cusbf::detail::fastx_fasta_extents(text);
+    ASSERT_EQ(extents.size(), 2U);
+    EXPECT_EQ((std::string_view{extents[0].begin, extents[0].end}), "\nAC>GT\r");
+    EXPECT_EQ((std::string_view{extents[1].begin, extents[1].end}), "TT\n");
+    EXPECT_TRUE(cusbf::detail::fastx_fasta_extents("").empty());
+    EXPECT_TRUE(cusbf::detail::fastx_fasta_extents("AC>GT\n").empty());
+}
+
 TEST(FastxSequenceScanTest, EmptyAndHeaderlessInputs) {
     EXPECT_TRUE(cusbf::detail::fastx_fasta_extents("").empty());
     EXPECT_TRUE(cusbf::detail::fastx_fasta_extents("ACGT\n").empty());

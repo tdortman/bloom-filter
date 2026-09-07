@@ -26,38 +26,28 @@ struct fastx_sequence_extent {
  * @brief Collects the sequence extents of every FASTA record in @p data.
  *
  * Each extent spans from the byte after a `>` header line to the byte before the next `>`
- * header line (or the end of the buffer), header bytes excluded. Line ends are located with the
- * SIMD-dispatched @ref fastx_line_end. Bytes outside extents (headers, leading blank lines) are
+ * header line (or the end of the buffer), header bytes excluded. Search directly for header
+ * markers with string_view::find; only header lines need a line-end scan. Bytes outside extents are
  * not part of any extent.
  */
 [[nodiscard]] inline std::vector<fastx_sequence_extent> fastx_fasta_extents(std::string_view data) {
     std::vector<fastx_sequence_extent> extents;
-    const char* const begin = data.data();
-    const char* const end = begin + data.size();
-    const char* p = begin;
-    while (p < end) {
-        auto const line_end =
-            p + fastx_line_end(std::string_view{p, static_cast<size_t>(end - p)}, 0);
-        const char* const line_end_ptr = line_end < end ? line_end : end;
-        if (line_end_ptr > p && *p == '>') {
-            const char* const seq_start = line_end < end ? line_end + 1 : end;
-            const char* q = seq_start;
-            while (q < end) {
-                auto const next_end =
-                    q + fastx_line_end(std::string_view{q, static_cast<size_t>(end - q)}, 0);
-                const char* const next_end_ptr = next_end < end ? next_end : end;
-                if (next_end_ptr > q && *q == '>') {
-                    break;
-                }
-                q = next_end < end ? next_end + 1 : end;
-            }
-            if (q > seq_start) {
-                extents.push_back({seq_start, q});
-            }
-            p = q;
-        } else {
-            p = line_end_ptr < end ? line_end_ptr + 1 : end;
+    size_t sequence = std::string_view::npos;
+    size_t header = data.find('>');
+    while (header != std::string_view::npos) {
+        if (header != 0 && data[header - 1] != '\n' && data[header - 1] != '\r') {
+            header = data.find('>', header + 1);
+            continue;
         }
+        if (sequence != std::string_view::npos && header > sequence) {
+            extents.push_back({data.data() + sequence, data.data() + header});
+        }
+        auto const end = fastx_line_end(data, header);
+        sequence = end < data.size() ? end + 1 : data.size();
+        header = data.find('>', sequence);
+    }
+    if (sequence != std::string_view::npos && sequence < data.size()) {
+        extents.push_back({data.data() + sequence, data.data() + data.size()});
     }
     return extents;
 }
